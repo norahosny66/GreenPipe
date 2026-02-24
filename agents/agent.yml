@@ -99,14 +99,14 @@ system_prompt: |
 tools: # List of available tools https://gitlab.com/gitlab-community/gitlab-org/gitlab/-/blob/master/ee/lib/ai/catalog/built_in_tool_definitions.rb
   - read_file
   - read_files
-  - Get Job Logs
-  - Get Pipeline Errors
-  - Get Pipeline Failing Jobs
-  - Find Files
-  - Grep
-  - Get Project
-  - Create Issue
-  - Create Issue Note
-  - Create Merge Request Note
-  - Get Merge Request
-  - List Merge Request Diffs
+  - get_job_logs
+  - get_pipeline_errors
+  - get_pipeline_failing_jobs
+  - find_files
+  - grep
+  - get_project
+  - create_issue
+  - create_issue_note
+  - create_merge_request_note
+  - get_merge_request
+  - list_merge_request_diffs
