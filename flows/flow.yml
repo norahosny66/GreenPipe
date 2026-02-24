@@ -1,6 +1,8 @@
+name: "GreenOps Flow"
+description: "GreenPipe for analyzing GitLab CI/CD carbon footprint and optimization opportunities."
+public: true
 definition:
   version: "v1"
-  description: "GreenPipe agent for analyzing GitLab CI/CD carbon footprint and optimization opportunities."
   environment: ambient
   components:
     - name: "greenpipe_analyzer"
