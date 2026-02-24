@@ -2,7 +2,7 @@ name: "GreenOps Flow"
 description: "GreenPipe for analyzing GitLab CI/CD carbon footprint and optimization opportunities."
 public: true
 definition:
-  version: "v1"
+  version: "v1.0.0"
   environment: ambient
   components:
     - name: "greenpipe_analyzer"
