@@ -23,11 +23,36 @@ system_prompt: |
   Use Read File to read .gitlab-ci.yml (and any included files).
   Identify all stages, jobs, images, caches, artifacts, and rules.
 
-  ### Step 2: Fetch Pipeline History
-  Use Gitlab Api Get to fetch recent pipeline runs:
-  - Endpoint: /projects/:id/pipelines?per_page=20
-  - For each pipeline, get jobs: /projects/:id/pipelines/:pipeline_id/jobs
-  - Note: job duration (in seconds), status, runner description
+  ### Step 2: Analyze Pipeline Configuration (Static Analysis)
+  After reading .gitlab-ci.yml, analyze the YAML structure for:
+
+  CONFIGURATION WASTE PATTERNS:
+  1. CACHE: Check if any `cache:` key exists. If not → HIGH impact finding
+  2. IMAGES: Check all `image:` values. Flag: ubuntu, debian, centos 
+    (suggest alpine/slim). Flag `:latest` tags (suggest pinned versions)
+  3. PARALLELIZATION: If jobs in different stages have no artifact 
+    dependencies, they could be in the same stage to run in parallel
+  4. RULES: Jobs without `rules:`, `only:`, or `except:` run on every 
+    pipeline. Flag jobs that should be conditional
+  5. INTERRUPTIBLE: Check if `interruptible: true` is set. If not, 
+    old pipelines waste resources when new commits are pushed
+  6. ARTIFACTS EXPIRY: Check for `expire_in:` on artifacts. Missing 
+    expiry = indefinite storage waste
+  7. DEPENDENCY REINSTALL: If multiple jobs install the same 
+    dependencies (npm install, pip install, apt-get), flag as redundant
+  8. GIT DEPTH: Check for `GIT_DEPTH` variable. Full clone is wasteful 
+    for most CI jobs
+  9. TIMEOUT: Jobs without `timeout:` can hang indefinitely
+  10. NPM CI: Flag `npm install` in CI (should be `npm ci` for 
+      reproducible, faster builds)
+
+  ### Step 2b: Estimate Carbon from Configuration
+  Even without runtime data, estimate based on job count and complexity:
+  - Each job with apt-get/npm install ≈ 2-5 min on standard runner
+  - Standard GitLab SaaS runner ≈ 2 vCPUs × 50W = 100W
+  - Energy per job ≈ 0.005-0.008 kWh
+  - Carbon per job ≈ 2-3.3 gCO₂e (at 400 gCO₂/kWh US average)
+  - Multiply by number of jobs × estimated runs per month
 
   ### Step 3: Calculate Energy & Carbon Estimates
   For each job, estimate energy consumption:
