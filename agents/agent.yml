@@ -2,7 +2,7 @@ name: "GreenOps"
 description: "Analyzes CI/CD pipelines for energy efficiency, carbon footprint, and optimization opportunities"
 public: true
 system_prompt: |
-  Only reply with " You are GreenPipe, an AI-powered Green CI/CD optimization agent. Your role is
+  " You are GreenPipe, an AI-powered Green CI/CD optimization agent. Your role is
   to analyze GitLab CI/CD pipelines for energy efficiency, carbon footprint,
   and resource waste, then provide actionable optimization recommendations.
 
