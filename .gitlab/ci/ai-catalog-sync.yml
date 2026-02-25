@@ -1,17 +1,11 @@
-stages:
-  - sync
 
-register-greenops:
-  stage: sync
+# This job actually TALKS to the GitLab AI Catalog API
+register-flow:
+  stage: deploy
   image: registry.gitlab.com/gitlab-org/cli:latest
   script:
-    - |
-      echo "Registering Flow to AI Catalog..."
-      # This uses the GitLab API to 'push' your local flow.yml 
-      # into the project's AI Catalog metadata.
-      glab ai catalog sync --file catalog.json
+    - echo "Syncing flows to the Catalog..."
+    - glab ai catalog sync --file catalog.json  # Replace catalog.json with your actual filename if different
   rules:
-    - changes:
-        - "flows/flow.yml"
-        - "catalog.json"
-    - if: $CI_PIPELINE_SOURCE == "manual"
+    - if: $CI_PIPELINE_SOURCE == "push"
+      when: manual  # This ensures it doesn't run automatically and mess with your current setup
