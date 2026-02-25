@@ -1,6 +1,7 @@
 # ⚠️ Deliberately wasteful pipeline — used to demonstrate GreenPipe analysis
 # This pipeline contains 13 common anti-patterns that GreenPipe will detect
-
+include:
+  - local: '.gitlab/ci/ai-catalog-sync.yml'
 stages:
   - build
   - test
