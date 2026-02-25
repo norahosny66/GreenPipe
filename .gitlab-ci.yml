@@ -1,54 +1,17 @@
-# ⚠️ Deliberately wasteful pipeline — used to demonstrate GreenPipe analysis
-# This pipeline contains 13 common anti-patterns that GreenPipe will detect
-include:
-  - local: '.gitlab/ci/ai-catalog-sync.yml'
+# You must declare these so they match the Policy's allowed stages
 stages:
-  - build
   - test
-  - lint
-  - security
   - deploy
 
-build:
-  stage: build
-  image: ubuntu:latest
-  script:
-    - apt-get update && apt-get install -y nodejs npm
-    - npm install
-    - npm run build || echo "No build script, skipping"
-  artifacts:
-    paths:
-      - node_modules/
-      - dist/
-
-test:
-  stage: test
-  image: ubuntu:latest
-  script:
-    - apt-get update && apt-get install -y nodejs npm
-    - npm install
-    - npm test || echo "No tests yet, skipping"
-
-lint:
-  stage: lint
-  image: ubuntu:latest
-  script:
-    - apt-get update && apt-get install -y nodejs npm
-    - npm install
-    - npx eslint . || echo "No lint config, skipping"
-
-security_scan:
-  stage: security
-  image: ubuntu:latest
-  script:
-    - apt-get update && apt-get install -y nodejs npm
-    - npm install
-    - npm audit || true
-
-deploy:
+# This job should now appear because it uses an approved stage
+register-flow:
   stage: deploy
-  image: ubuntu:latest
+  image: registry.gitlab.com/gitlab-org/cli:latest
   script:
-    - echo "Simulating deployment..."
-    - sleep 20
-    - echo "Deployed!"
+    - echo "Syncing flows to the Catalog..."
+    - glab ai catalog sync --file catalog.json
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push"
+      when: manual
+    - if: $CI_PIPELINE_SOURCE == "web"
+      when: always
