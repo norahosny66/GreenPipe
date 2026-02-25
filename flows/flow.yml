@@ -1,11 +1,11 @@
-name: "GreenOps_Flow"
+name: "greenops_flow"
 description: "GreenPipe for analyzing GitLab CI/CD carbon footprint and optimization opportunities."
 public: true
 definition:
   version: "v1"
   environment: ambient
   components:
-    - name: "GreenOps_Flow"
+    - name: "greenops_flow"
       type: AgentComponent
       prompt_id: "greenpipe_prompt"
       inputs:
@@ -102,8 +102,8 @@ definition:
         timeout: 300
 
   routers:
-    - from: "GreenOps_Flow"
+    - from: "greenops_flow"
       to: "end"
 
   flow:
-    entry_point: "GreenOps_Flow"
+    entry_point: "greenops_flow"
