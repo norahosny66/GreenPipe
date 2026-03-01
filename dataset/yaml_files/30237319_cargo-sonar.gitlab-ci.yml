@@ -1,0 +1,73 @@
+variables:
+  IMAGE_NAME: woshilapin/cargo-sonar
+  DOCKERHUB_USERNAME: woshilapin
+
+include:
+  - component: gitlab.com/woshilapin/cicd-components/cargo-audit@main
+  - component: gitlab.com/woshilapin/cicd-components/cargo-auto-tag@main
+    inputs:
+      commit-username: Jean SIMARD
+      commit-email: woshilapin@tuziwo.info
+      gitlab-login: woshilapin
+      gitlab-token: $GITLAB_TOKEN
+  - component: gitlab.com/woshilapin/cicd-components/cargo-clippy@main
+  - component: gitlab.com/woshilapin/cicd-components/cargo-deny@main
+  # 'color-spantrace' is an indirect dependency through 'color-eyre'. Both
+  # 'color-eyre' and 'color-spantrace' depends on 'owo-colors', but starting
+  # version '0.2.2', they depend on different versions of 'owo-colors' which
+  # makes the build break with 'direct-minimal-versions'
+  # - component: gitlab.com/woshilapin/cicd-components/cargo-direct-minimal-versions@main
+  - component: gitlab.com/woshilapin/cicd-components/cargo-doc@main
+  - component: gitlab.com/woshilapin/cicd-components/cargo-fmt@main
+  - component: gitlab.com/woshilapin/cicd-components/cargo-hack@main
+    inputs:
+      cargo-hack-arguments: --feature-powerset --no-dev-deps --at-least-one-of audit,clippy,deny,outdated,udeps --at-least-one-of sonar,codeclimate
+  - component: gitlab.com/woshilapin/cicd-components/cargo-llvm-cov@main
+    inputs:
+      codecov-enable: "true"
+  - component: gitlab.com/woshilapin/cicd-components/cargo-outdated@main
+  - component: gitlab.com/woshilapin/cicd-components/cargo-publish@main
+  - component: gitlab.com/woshilapin/cicd-components/cargo-tarpaulin@main
+  - component: gitlab.com/woshilapin/cicd-components/cargo-udeps@main
+  - component: gitlab.com/woshilapin/cicd-components/codecov@main
+    inputs:
+      codecov-token: ${CODECOV_TOKEN}
+  - component: gitlab.com/woshilapin/cicd-components/conventional-commit@main
+  - component: gitlab.com/woshilapin/cicd-components/open-container@main
+    inputs:
+      image: ${IMAGE_NAME}
+      tag: nightly
+      if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      dockerhub-username: ${DOCKERHUB_USERNAME}
+      dockerhub-token: ${DOCKERHUB_TOKEN}
+  - component: gitlab.com/woshilapin/cicd-components/open-container@main
+    inputs:
+      image: ${IMAGE_NAME}
+      tag: ${CI_COMMIT_TAG}
+      aliases: latest
+      if: '$CI_COMMIT_TAG'
+      dockerhub-username: ${DOCKERHUB_USERNAME}
+      dockerhub-token: ${DOCKERHUB_TOKEN}
+  - component: gitlab.com/woshilapin/cicd-components/sonar-scanner@main
+    inputs:
+      sonar-token: ${SONAR_TOKEN}
+  - component: gitlab.com/woshilapin/cicd-components/taplo@main
+  - component: gitlab.com/woshilapin/cicd-components/typos@main
+
+  # This one can't be made into a component because it depends on a dynamic list
+  # of artifacts and components can't make a dynamic list of `needs:`.
+  # See https://gitlab.com/gitlab-org/gitlab/-/issues/407556#note_1476355255
+  - .gitlab/cargo-sonar.yml
+
+  # # stage deploy
+  - .gitlab/build.yml
+  - .gitlab/gitlab-release.yml
+
+
+workflow:
+  rules:
+    - if: $CI_MERGE_REQUEST_IID
+    - if: $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG

@@ -1,0 +1,883 @@
+---
+
+# Use merge request pipelines when a merge request is open for the branch.
+# Use branch pipelines when a merge request is not open for the branch.
+# https://docs.gitlab.com/ci/yaml/workflow/#switch-between-branch-pipelines-and-merge-request-pipelines
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+
+
+stages:
+  - lint
+  - test  # default for jobs that do not specify stage:
+  - deploy
+
+
+variables:
+  pip: pip3 --timeout 100 --retries 10
+  # speed up git checkout phase
+  GIT_DEPTH: 1
+
+
+# Run the whole test suite in an environment that is like the
+# buildserver guest VM.  This installs python3-babel because that is
+# only used by the test suite, and not needed in the buildserver.
+#
+# Some extra packages are required for this test run that are not
+# provided by the buildserver since they are not needed there:
+# * python3-babel for compiling localization files
+# * gnupg-agent for the full signing setup
+# * python3-clint for fancy progress bars for users
+# * python3-pycountry for linting config/mirrors.yml
+buildserver run-tests:
+  image: registry.gitlab.com/fdroid/fdroidserver:buildserver
+  script:
+    - apt-get update
+    - apt-get install gnupg-agent python3-babel python3-biplist python3-clint python3-pycountry
+    - ./tests/run-tests
+    # make sure that translations do not cause stacktraces
+    - cd $CI_PROJECT_DIR/locale
+    - for locale in *; do
+          test -d $locale || continue;
+          for cmd in `sed -n 's/.*("\(.*\)", *_.*/\1/p' $CI_PROJECT_DIR/fdroid`; do
+              LANGUAGE=$locale $CI_PROJECT_DIR/fdroid $cmd --help > /dev/null;
+          done
+      done
+
+# Test that the parsing of the .yml metadata format didn't change from last
+# released version. This uses the commit ID of the release tags,
+# rather than the release tag itself so that contributor forks do not
+# need to include the tags in them for this test to work.
+#
+# The COMMIT_ID should be bumped after each release, so that the list
+# of sed hacks needed does not continuously grow.
+metadata_v0:
+  image: registry.gitlab.com/fdroid/fdroidserver:buildserver
+  variables:
+    GIT_DEPTH: 1000
+    RELEASE_COMMIT_ID: d172d991803b27ad5213d11b5a737e5cb9e5fc3a  # after switching to `git rev-parse`
+  script:
+    - git fetch https://gitlab.com/fdroid/fdroidserver.git $RELEASE_COMMIT_ID
+    - cd tests
+    - export GITCOMMIT=$(git rev-parse HEAD)
+    - git checkout $RELEASE_COMMIT_ID
+    - cd ..
+    - git clone --depth 1 https://gitlab.com/fdroid/fdroiddata.git
+    - rm -f fdroiddata/config.yml  # ignore config for this test
+    - cd fdroiddata
+    - ../tests/dump_internal_metadata_format.py
+    - cd ..
+    - git reset --hard
+    - git checkout $GITCOMMIT
+    - cd fdroiddata
+    - ../tests/dump_internal_metadata_format.py
+    - sed -i
+          -e '/ArchivePolicy:/d'
+          -e '/FlattrID:/d'
+          -e '/RequiresRoot:/d'
+          metadata/dump_*/*.yaml
+    - diff -uw metadata/dump_*
+
+.apt-template: &apt-template
+  variables:
+    DEBIAN_FRONTEND: noninteractive
+    LANG: C.UTF-8
+  before_script:
+    - echo Etc/UTC > /etc/timezone
+    - echo 'APT::Install-Recommends "0";'
+           'APT::Install-Suggests "0";'
+           'APT::Get::Assume-Yes "true";'
+           'Acquire::Retries "20";'
+           'Dpkg::Use-Pty "0";'
+           'quiet "1";'
+        >> /etc/apt/apt.conf.d/99gitlab
+    # Ubuntu and other distros often lack https:// support
+    - grep Debian /etc/issue.net
+        && { find /etc/apt/sources.list* -type f | xargs sed -i s,http:,https:, ; }
+    # The official Debian docker images ship without ca-certificates,
+    # TLS certificates cannot be verified until that is installed. The
+    # following code turns off TLS verification, and enables HTTPS, so
+    # at least unverified TLS is used for apt-get instead of plain
+    # HTTP.  Once ca-certificates is installed, the CA verification is
+    # enabled by removing this config.  This set up makes the initial
+    # `apt-get update` and `apt-get install` look the same as verified
+    # TLS to the network observer and hides the metadata.
+    - echo 'Acquire::https::Verify-Peer "false";' > /etc/apt/apt.conf.d/99nocacertificates
+    - apt-get update
+    - apt-get install ca-certificates
+    - rm /etc/apt/apt.conf.d/99nocacertificates
+    - apt-get dist-upgrade
+
+# For jobs that only need to run when there are changes to Python files.
+.python-rules-changes: &python-rules-changes
+  rules:
+    - changes:
+        - .gitlab-ci.yml
+        - fdroid
+        - makebuildserver
+        - setup.py
+        - fdroidserver/*.py
+        - tests/*.py
+
+
+# Since F-Droid uses Debian as its default platform, from production
+# servers to CI to contributor machines, it is important to know when
+# changes in Debian break our stuff.  This tests against the latest
+# dependencies as they are included in Debian.
+debian_testing:
+  image: debian:testing
+  <<: *apt-template
+  rules:
+    - if: $CI_COMMIT_BRANCH == "master" && $CI_PROJECT_PATH == "fdroid/fdroidserver"
+  script:
+    - apt-get install
+        aapt
+        androguard
+        apksigner
+        dexdump
+        fdroidserver
+        git
+        gnupg
+        ipfs-cid
+        python3-babel
+        python3-biplist
+        python3-defusedxml
+        python3-libcloud
+        python3-pycountry
+        python3-setuptools
+        sdkmanager
+    - python3 -c 'import fdroidserver'
+    - python3 -c 'import androguard'
+    - python3 -c 'import sdkmanager'
+    - ./setup.py compile_catalog
+    - cd tests
+    - ./run-tests
+
+
+# Test using latest LTS set up with the PPA, including Recommends.
+ubuntu_lts_ppa:
+  image: ubuntu:latest
+  <<: *apt-template
+  rules:
+    - if: $CI_COMMIT_BRANCH == "master" && $CI_PROJECT_PATH == "fdroid/fdroidserver"
+  script:
+    - export ANDROID_HOME=/usr/lib/android-sdk
+    - apt-get install gnupg
+    - while ! apt-key adv --keyserver keyserver.ubuntu.com --recv-key 9AAC253193B65D4DF1D0A13EEC4632C79C5E0151; do sleep 15; done
+    - export RELEASE=$(sed -n 's,^Suites\x3a \([a-z]*\).*,\1,p' /etc/apt/sources.list.d/*.sources | head -1)
+    - echo "deb http://ppa.launchpad.net/fdroid/fdroidserver/ubuntu $RELEASE main" >> /etc/apt/sources.list
+    - apt-get update
+    - apt-get dist-upgrade
+    - apt-get install --install-recommends
+        dexdump
+        fdroidserver
+        git
+        python3-biplist
+        python3-pycountry
+        python3-setuptools
+        sdkmanager
+
+    # Test things work with a default branch other than 'master'
+    - git config --global init.defaultBranch thisisnotmasterormain
+
+    - cd tests
+    - ./run-tests
+
+
+# Test to see how rclone works with S3
+test_deploy_to_s3_with_rclone:
+  image: debian:trixie-slim
+  <<: *apt-template
+  tags:
+    - saas-linux-small-amd64  # the shared runners are known to support Docker.
+  services:
+    - name: docker:dind
+      command: ["--tls=false"]
+  variables:
+    DOCKER_HOST: "tcp://docker:2375"
+    DOCKER_DRIVER: overlay2
+    DOCKER_TLS_CERTDIR: ""
+  before_script:
+    # ensure minio is up before executing tests
+    - apt-get update
+    - apt-get install -y
+        androguard
+        apksigner
+        curl
+        docker.io
+        git
+        python3-venv
+        rclone
+    # This job requires working docker but will silently fail if docker is not available
+    - docker info
+    - python3 -m venv --system-site-packages test-venv
+    - . test-venv/bin/activate
+    - pip install testcontainers[minio]
+    - pip install .
+  script:
+    - python3 -m unittest -k test_update_remote_storage_with_rclone --verbose
+  rules:
+    - changes:
+        - .gitlab-ci.yml
+        - fdroidserver/deploy.py
+        - tests/test_deploy.py
+        - tests/test_integration.py
+
+
+# Test using Ubuntu/jammy LTS (supported til April, 2027) with depends
+# from pypi and sdkmanager.  The venv is used to isolate the dist
+# tarball generation environment from the clean install environment.
+ubuntu_jammy_pip:
+  image: ubuntu:jammy
+  <<: *apt-template
+  script:
+    - apt-get install git default-jdk-headless python3-pip python3-venv rsync
+
+    # setup venv to act as release build machine
+    - python3 -m venv sdist-env
+    - . sdist-env/bin/activate
+    - ./setup.py sdist
+    - deactivate
+    - tar tzf dist/fdroidserver-*.tar.gz
+
+    # back to bare machine to act as user's install machine
+    - export ANDROID_HOME=/opt/android-sdk
+    - $pip install sdkmanager
+    - sdkmanager 'build-tools;35.0.0'
+
+    # Install extras_require.optional from setup.py
+    - $pip install biplist pycountry
+
+    - $pip install dist/fdroidserver-*.tar.gz
+    - tar xzf dist/fdroidserver-*.tar.gz
+    - cd fdroidserver-*
+    - export PATH=$PATH:$ANDROID_HOME/build-tools/35.0.0
+    - fdroid=`which fdroid` ./tests/run-tests
+
+    # check localization was properly installed
+    - LANGUAGE='de' fdroid --help | grep 'Gültige Befehle sind'
+
+
+# Run all the various linters and static analysis tools.
+hooks/pre-commit:
+  stage: lint
+  image: debian:trixie-slim
+  variables:
+    LANG: C.UTF-8
+  script:
+    - apt-get update
+    - apt-get -y install --no-install-recommends
+          bash
+          ca-certificates
+          dash
+          gcc
+          git
+          make
+          pycodestyle
+          pyflakes3
+          python3-dev
+          python3-git
+          python3-nose2
+          python3-pip
+          python3-yaml
+    - ./hooks/pre-commit
+
+bandit:
+  image: debian:trixie-slim
+  <<: *python-rules-changes
+  <<: *apt-template
+  script:
+    - apt-get install python3-pip
+    - $pip install --break-system-packages bandit
+    - bandit -r -ii --ini .bandit
+
+pylint:
+  stage: lint
+  image: debian:trixie-slim
+  <<: *python-rules-changes
+  <<: *apt-template
+  script:
+    - apt-get install pylint python3-pip
+    - $pip install --break-system-packages pylint-gitlab
+    - pylint --output-format=colorized,pylint_gitlab.GitlabCodeClimateReporter:pylint-report.json
+            fdroid
+            makebuildserver
+            setup.py
+            fdroidserver/*.py
+            tests/*.py
+  artifacts:
+    reports:
+      codequality: pylint-report.json
+    when: always
+
+
+shellcheck:
+  stage: lint
+  image: debian:trixie-slim
+  rules:
+    - changes:
+        - .gitlab-ci.yml
+        - hooks/install-hooks.sh
+        - hooks/pre-commit
+        - tests/run-tests
+  <<: *apt-template
+  script:
+    - apt-get install shellcheck
+    # TODO GitLab Code Quality report https://github.com/koalaman/shellcheck/issues/3155
+    - shellcheck --exclude SC2046,SC2090 --severity=warning --color
+        hooks/install-hooks.sh
+        hooks/pre-commit
+        tests/run-tests
+
+# Run pip-audit, check for known vulnerabilities in python dependencies
+pip-audit:
+  stage: lint
+  image: debian:13-slim
+  script:
+    - apt update -yyq
+    - apt upgrade -yyq
+    - apt install -yyq --no-install-recommends python3 python3-venv
+    - python3 -m venv env
+    - . env/bin/activate
+    - python3 -m ensurepip
+    - python3 -m pip install --upgrade pip
+    - python3 -m pip install pip-audit
+    # always print long-form json output
+    - python3 -m pip_audit -f json | python3 -m json.tool --indent=2 || true
+    # then print human readable summary
+    - python3 -m pip_audit
+
+# Check all the dependencies in Debian to mirror production.  CVEs are
+# generally fixed in the latest versions in pip/pypi.org, so it isn't
+# so important to scan that kind of install in CI.
+# https://docs.safetycli.com/safety-docs/installation/gitlab
+safety:
+  image: debian:trixie-slim
+  rules:
+    - if: $SAFETY_API_KEY
+      changes:
+        - .gitlab-ci.yml
+        - .safety-policy.yml
+        - pyproject.toml
+        - setup.py
+  <<: *apt-template
+  variables:
+    LANG: C.UTF-8
+  script:
+    - apt-get install
+        fdroidserver
+        python3-biplist
+        python3-pip
+        python3-pycountry
+        python3-venv
+    - $pip install --break-system-packages .
+
+    - python3 -m venv --system-site-packages env
+    - . env/bin/activate
+    - $pip install --break-system-packages safety
+    - python3 -m safety --key "$SAFETY_API_KEY" --stage cicd scan
+
+
+# TODO tests/*/*/*.yaml are not covered
+yamllint:
+  stage: lint
+  image: debian:trixie-slim
+  rules:
+    - changes:
+        - .gitlab-ci.yml
+        - .safety-policy.yml
+        - .yamllint
+        - '*/*.yaml'
+        - '*/*.yml'
+        - tests/*.yml
+        - tests/*/*.yml
+        - tests/*/*/.*.yml
+  <<: *apt-template
+  variables:
+    LANG: C.UTF-8
+  script:
+    - apt-get install yamllint
+    - yamllint
+        .gitlab-ci.yml
+        .safety-policy.yml
+        .yamllint
+        */*.yaml
+        */*.yml
+        tests/*.yml
+        tests/*/*.yml
+        tests/*/*/.*.yml
+
+
+locales:
+  stage: lint
+  image: debian:trixie-slim
+  variables:
+    LANG: C.UTF-8
+  script:
+    - apt-get update
+    - apt-get -y install --no-install-recommends
+          gettext
+          make
+          python3-babel
+    - export EXITVALUE=0
+    - function set_error() { export EXITVALUE=1; printf "\x1b[31mERROR `history|tail -2|head -1|cut -b 6-500`\x1b[0m\n"; }
+    - make -C locale compile || set_error
+    - rm -f locale/*/*/*.mo
+    - pybabel compile --domain=fdroidserver --directory locale 2>&1 | { grep -F "error:" && exit 1; } || true
+    - exit $EXITVALUE
+
+
+black:
+  stage: lint
+  image: debian:trixie-slim
+  <<: *apt-template
+  script:
+    - apt-get install black
+    - black --check --diff --color $CI_PROJECT_DIR
+
+fedora_latest:
+  image: fedora:39  # support ends on 2024-11-12
+  script:
+    # tricks to hopefully make runs more reliable
+    - echo "timeout=600" >> /etc/dnf/dnf.conf
+    - echo "retries=50" >> /etc/dnf/dnf.conf
+    - echo "keepcache=True" >> /etc/dnf/dnf.conf
+
+    - dnf -y update || dnf -y update
+    - dnf -y install @development-tools
+                     diffutils
+                     findutils
+                     git
+                     gnupg
+                     java-17-openjdk-devel
+                     openssl
+                     python3
+                     python3-babel
+                     python3-matplotlib
+                     python3-pip
+                     python3-pycountry
+                     rsync
+                     which
+    - $pip install sdkmanager
+    - ./setup.py sdist
+    - useradd -m -c "test account" --password "fakepassword"  testuser
+    - su testuser --login --command "cd `pwd`; $pip install --user dist/fdroidserver-*.tar.gz"
+    - test -e ~testuser/.local/share/locale/de/LC_MESSAGES/fdroidserver.mo
+    - export BUILD_TOOLS_VERSION=`sed -n "s,^MINIMUM_APKSIGNER_BUILD_TOOLS_VERSION\s*=\s*['\"]\(.*\)[['\"],\1,p" fdroidserver/common.py`
+    - export ANDROID_HOME=`pwd`/android-sdk
+    - mkdir -p $ANDROID_HOME/licenses/
+    - printf "\n8933bad161af4178b1185d1a37fbf41ea5269c55\nd56f5187479451eabf01fb78af6dfcb131a6481e\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > $ANDROID_HOME/licenses/android-sdk-license
+    - printf "\n84831b9409646a918e30573bab4c9c91346d8abd" > $ANDROID_HOME/licenses/android-sdk-preview-license
+    - printf "\n79120722343a6f314e0719f863036c702b0e6b2a\n84831b9409646a918e30573bab4c9c91346d8abd" > $ANDROID_HOME/licenses/android-sdk-preview-license-old
+    - mkdir ~/.android
+    - touch ~/.android/repositories.cfg
+    - sdkmanager "platform-tools" "build-tools;$BUILD_TOOLS_VERSION"
+    - chown -R testuser .
+    - cd tests
+    - su testuser --login --command
+        "cd `pwd`; export CI=$CI ANDROID_HOME=$ANDROID_HOME; fdroid=~testuser/.local/bin/fdroid ./run-tests"
+
+
+macOS:
+  tags:
+    - saas-macos-medium-m1
+  rules:
+    - if: $CI_COMMIT_BRANCH == "master" && $CI_PROJECT_PATH == "fdroid/fdroidserver"
+  script:
+    - export HOMEBREW_CURL_RETRIES=10
+    - brew update > /dev/null
+    - brew upgrade
+    - brew install fdroidserver
+
+    # Android SDK and Java JDK
+    - brew install --cask android-commandlinetools temurin  # temurin is a JDK
+
+    # test suite dependencies
+    - brew install bash coreutils gnu-sed
+    # TODO port tests/run-tests to POSIX and gsed, it has a couple GNU-isms like du --bytes
+    - export PATH="$(brew --prefix fdroidserver)/libexec/bin:$(brew --prefix coreutils)/libexec/gnubin:$PATH"
+
+    - brew autoremove
+    - brew info fdroidserver
+
+    - export BUILD_TOOLS_VERSION=`gsed -n "s,^MINIMUM_APKSIGNER_BUILD_TOOLS_VERSION\s*=\s*['\"]\(.*\)[['\"],\1,p" fdroidserver/common.py`
+    - export ANDROID_HOME="$(brew --prefix)/share/android-commandlinetools"
+    - mkdir -p "$ANDROID_HOME/licenses"
+    - echo -e "\n8933bad161af4178b1185d1a37fbf41ea5269c55" > "$ANDROID_HOME/licenses/android-sdk-license"
+    - echo -e "\nd56f5187479451eabf01fb78af6dfcb131a6481e" >> "$ANDROID_HOME/licenses/android-sdk-license"
+    - echo -e "\n24333f8a63b6825ea9c5514f83c2829b004d1fee" >> "$ANDROID_HOME/licenses/android-sdk-license"
+    - $(brew --prefix)/bin/sdkmanager "build-tools;$BUILD_TOOLS_VERSION"
+
+    - echo "macOS sticks with bash 3.x because of licenses, so avoid new bash syntax"
+    - /bin/bash --version
+    - /bin/bash -n tests/run-tests
+
+    # test fdroidserver from git with current package's dependencies
+    - fdroid="$(brew --prefix fdroidserver)/libexec/bin/python3 $PWD/fdroid" ./tests/run-tests
+
+
+# Run an actual build in a simple, faked version of the buildserver guest VM.
+fdroid build:
+  image: registry.gitlab.com/fdroid/fdroidserver:buildserver
+  rules:
+    - changes:
+        - .gitlab-ci.yml
+        - fdroidserver/build.py
+        - fdroidserver/common.py
+        - fdroidserver/exception.py
+        - fdroidserver/metadata.py
+        - fdroidserver/net.py
+        - fdroidserver/scanner.py
+        - fdroidserver/vmtools.py
+        # for the docker: job which depends on this one
+        - makebuildserver
+        - buildserver/*
+  cache:
+    key: "$CI_JOB_NAME"
+    paths:
+      - .gradle
+  script:
+    - apt-get update
+    - apt-get dist-upgrade
+    - apt-get clean
+
+    - test -n "$fdroidserver" || source /etc/profile.d/bsenv.sh
+
+    - ln -fsv "$CI_PROJECT_DIR" "$fdroidserver"
+
+    # TODO remove sdkmanager install once it is included in the buildserver image
+    - apt-get install sdkmanager
+    - rm -rf "$ANDROID_HOME/tools"  # TODO remove once sdkmanager can upgrade installed packages
+    - sdkmanager "tools" "platform-tools" "build-tools;31.0.0"
+
+    - git ls-remote https://gitlab.com/fdroid/fdroiddata.git master
+    - git clone --depth 1 https://gitlab.com/fdroid/fdroiddata.git
+    - cd fdroiddata
+    - for d in build logs repo tmp unsigned $home_vagrant/.android; do
+          test -d $d || mkdir $d;
+          chown -R vagrant $d;
+      done
+
+    - export GRADLE_USER_HOME=$home_vagrant/.gradle
+    - export fdroid="sudo --preserve-env --user vagrant
+          env PATH=$fdroidserver:$PATH
+          env PYTHONPATH=$fdroidserver:$fdroidserver/examples
+          env PYTHONUNBUFFERED=true
+          env TERM=$TERM
+          env HOME=$home_vagrant
+          fdroid"
+
+    - git -C $home_vagrant/gradlew-fdroid pull
+
+    - chown -R vagrant $home_vagrant
+    - chown -R vagrant $fdroidserver/.git
+    - chown vagrant $fdroidserver/
+    - chown -R vagrant .git
+    - chown vagrant .
+
+    # try user build
+    - $fdroid build --verbose --latest org.fdroid.fdroid.privileged
+
+    # try on-server build
+    - $fdroid build --verbose --on-server --no-tarball --latest org.fdroid.fdroid
+
+    # each `fdroid build --on-server` run expects sudo, then uninstalls it
+    - if dpkg --list sudo; then echo "sudo should not be still there"; exit 1; fi
+    - 'if [ ! -f repo/status/running.json ]; then echo "ERROR: running.json does not exist!"; exit 1; fi'
+    - 'if [ ! -f repo/status/build.json ]; then echo "ERROR: build.json does not exist!"; exit 1; fi'
+
+
+# test the plugin API and specifically the fetchsrclibs plugin, which
+# is used by the `fdroid build` job.  This uses a fixed commit from
+# fdroiddata because that one is known to work, and this is a CI job,
+# so it should be isolated from the normal churn of fdroiddata.
+plugin_fetchsrclibs:
+  image: debian:trixie-slim
+  <<: *apt-template
+  rules:
+    - changes:
+        - .gitlab-ci.yml
+        - examples/fdroid_fetchsrclibs.py
+        - fdroidserver/__main__.py
+  script:
+    - apt-get install
+        curl
+        git
+        python3-cffi
+        python3-matplotlib
+        python3-nacl
+        python3-paramiko
+        python3-pil
+        python3-pip
+        python3-pycparser
+        python3-setuptools
+        python3-venv
+    - python3 -m venv --system-site-packages env
+    - . env/bin/activate
+    - export PATH="$CI_PROJECT_DIR:$PATH"
+    - export PYTHONPATH="$CI_PROJECT_DIR/examples"
+    - $pip install -e .
+    - fdroid | grep fetchsrclibs
+
+    - mkdir fdroiddata
+    - commitid=b9e9a077d720c86ff6fff4dbb341254cc4370b1a
+    - curl https://gitlab.com/fdroid/fdroiddata/-/archive/${commitid}/fdroiddata-${commitid}.tar.gz
+          | tar -xz --directory=fdroiddata --strip-components=1
+    - cd fdroiddata
+    - fdroid fetchsrclibs freemap.opentrail:4 --verbose
+    - test -d build/freemap.opentrail/.git
+    - test -d build/srclib/andromaps/.git
+    - test -d build/srclib/freemaplib/.git
+    - test -d build/srclib/freemaplibProj/.git
+    - test -d build/srclib/JCoord/.git
+    - test -d build/srclib/javaproj/.git
+
+
+# test a full update and deploy cycle to gitlab.com
+servergitmirrors:
+  image: debian:trixie-slim
+  <<: *apt-template
+  rules:
+    - if: $CI_COMMIT_BRANCH == "master" && $CI_PROJECT_PATH == "fdroid/fdroidserver"
+  script:
+    - apt-get install
+        default-jdk-headless
+        git
+        openssh-client
+        openssl
+        python3-cffi
+        python3-cryptography
+        python3-matplotlib
+        python3-nacl
+        python3-pil
+        python3-pip
+        python3-pycparser
+        python3-setuptools
+        python3-venv
+        rsync
+        wget
+    - apt-get install apksigner
+    - python3 -m venv --system-site-packages env
+    - . env/bin/activate
+    - export PYTHONPATH=`pwd`
+    - $pip install -e .
+    - mkdir -p /root/.ssh/
+    - ./tests/key-tricks.py
+    - ssh-keyscan gitlab.com >> /root/.ssh/known_hosts
+    - test -d /tmp/fdroid/repo || mkdir -p /tmp/fdroid/repo
+    - cp tests/config.yml tests/keystore.jks /tmp/fdroid/
+    - cp tests/repo/com.politedroid_6.apk /tmp/fdroid/repo/
+    - cd /tmp/fdroid
+    - touch fdroid-icon.png
+    - printf "\nservergitmirrors\x3a 'git@gitlab.com:fdroid/ci-test-servergitmirrors-repo.git'\n" >> config.yml
+    - $PYTHONPATH/fdroid update --verbose --create-metadata
+    - $PYTHONPATH/fdroid deploy --verbose
+    - export DLURL=`grep -Eo 'https://gitlab.com/fdroid/ci-test-servergitmirrors-repo[^"]+' repo/index-v1.json`
+    - echo $DLURL
+    - wget $DLURL/index-v1.jar
+    - diff repo/index-v1.jar index-v1.jar
+
+Build documentation:
+  image: debian:trixie-slim
+  <<: *python-rules-changes
+  <<: *apt-template
+  script:
+    - apt-get install make python3-sphinx python3-numpydoc python3-pydata-sphinx-theme pydocstyle fdroidserver
+    - apt-get purge fdroidserver
+    # ignore vendored files
+    - pydocstyle --verbose --match='(?!apksigcopier|looseversion|setup|test_).*\.py' fdroidserver
+    - cd docs
+    - sphinx-apidoc -o ./source ../fdroidserver -M -e
+    - PYTHONPATH=.. sphinx-autogen -o generated source/*.rst
+    - PYTHONPATH=.. make html
+  artifacts:
+    paths:
+      - docs/build/html/
+
+
+# this job will only run in branches called "windows" until the Windows port is complete
+Windows:
+  tags:
+    - windows
+  rules:
+    - if: $CI_COMMIT_BRANCH == "windows"
+  script:
+    - Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
+    - choco install --no-progress -y git --force --params "/GitAndUnixToolsOnPath"
+    - choco install --no-progress -y python3 --version=3.10
+    - choco install --no-progress -y jdk8
+    - choco install --no-progress -y rsync
+    - refreshenv
+    - python -m pip install --upgrade babel pip setuptools
+    - python -m pip install -e .
+
+    - $files = @(Get-ChildItem tests\test_*.py)
+    - foreach ($f in $files) {
+          write-output $f;
+          python -m unittest $f;
+          if( $LASTEXITCODE -eq 0 ) {
+              write-output "SUCCESS $f";
+          } else {
+              write-output "ERROR $f failed";
+          }
+      }
+
+    # these are the tests that must pass
+    - python -m unittest -k
+        checkupdates
+        exception
+        import_subcommand
+        test_lint
+        test_metadata
+        test_rewritemeta
+        test_vcs
+        tests.test_init
+        tests.test_main
+  after_script:
+    - Copy-Item C:\ProgramData\chocolatey\logs\chocolatey.log
+  artifacts:
+    when: always
+    paths:
+      - "*.log"
+  allow_failure:
+    exit_codes: 1
+
+
+pages:
+  image: alpine:latest
+  stage: deploy
+  script:
+    - cp docs/build/html public -r  # GL Pages needs the files in a directory named "public"
+  artifacts:
+    paths:
+      - public
+  needs:
+    - job: "Build documentation"
+      optional: true
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'  # only publish pages on default (master) branch
+
+
+# This job pushes the official CI docker image based on the master
+# branch, so in fdroid/fdroidserver, it should only run on the master
+# branch.  Otherwise, tags or other branches will overwrite the docker
+# image which is supposed to be what is in master.
+docker:
+  dependencies:
+    - fdroid build
+  rules:
+    - if: $CI_COMMIT_BRANCH == "master" && $CI_PROJECT_PATH == "fdroid/fdroidserver"
+      changes:
+        - .gitlab-ci.yml
+        - makebuildserver
+        - buildserver/*
+  image: docker:dind
+  services:
+    - docker:dind
+  variables:
+    RELEASE_IMAGE: $CI_REGISTRY_IMAGE:buildserver
+  script:
+    # git ref names can contain many chars that are not allowed in docker tags
+    - export TEST_IMAGE=$CI_REGISTRY_IMAGE:$(printf $CI_COMMIT_REF_NAME | sed 's,[^a-zA-Z0-9_.-],_,g')
+    - cd buildserver
+    - docker build -t $TEST_IMAGE --build-arg GIT_REV_PARSE_HEAD=$(git rev-parse HEAD) .
+    - docker tag $TEST_IMAGE $RELEASE_IMAGE
+    - docker tag $TEST_IMAGE ${RELEASE_IMAGE}-trixie
+    - echo $CI_JOB_TOKEN | docker login -u gitlab-ci-token --password-stdin registry.gitlab.com
+    # This avoids filling up gitlab.com free tier accounts with unused docker images.
+    - if test -z "$FDROID_PUSH_DOCKER_IMAGE"; then
+          echo "Skipping docker push to save quota on your gitlab namespace.";
+          echo "If you want to enable the push, set FDROID_PUSH_DOCKER_IMAGE in";
+          echo "https://gitlab.com/$CI_PROJECT_NAMESPACE/fdroidserver/-/settings/ci_cd#js-cicd-variables-settings";
+          exit 0;
+      fi
+    - docker push $RELEASE_IMAGE
+    - docker push $RELEASE_IMAGE-trixie
+
+
+# PUBLISH is the signing server.  It has a very minimal manual setup.
+PUBLISH:
+  image: debian:bookworm-backports
+  <<: *python-rules-changes
+  script:
+    - apt-get update
+    - apt-get -qy upgrade
+    - apt-get -qy install --no-install-recommends -t bookworm-backports
+        androguard
+        apksigner
+        curl
+        default-jdk-headless
+        git
+        gpg
+        gpg-agent
+        python3-asn1crypto
+        python3-defusedxml
+        python3-git
+        python3-ruamel.yaml
+        python3-yaml
+        rsync
+
+    # Run only relevant parts of the test suite, other parts will fail
+    # because of this minimal base setup.
+    - python3 -m unittest
+        tests/test_gpgsign.py
+        tests/test_metadata.py
+        tests/test_publish.py
+        tests/test_signatures.py
+        tests/test_signindex.py
+
+    - cd tests
+    - mkdir archive
+    - mkdir unsigned
+    - cp urzip-release-unsigned.apk unsigned/info.guardianproject.urzip_100.apk
+    - grep '^key.*pass' config.yml | sed 's,\x3a ,=,' > $CI_PROJECT_DIR/variables
+    - sed -Ei 's,^(key.*pass|keystore)\x3a.*,\1\x3a {env\x3a \1},' config.yml
+    - printf '\ngpghome\x3a {env\x3a gpghome}\n' >> config.yml
+    - |
+      tee --append $CI_PROJECT_DIR/variables <<EOF
+          gpghome=$CI_PROJECT_DIR/tests/gnupghome
+          keystore=$CI_PROJECT_DIR/tests/keystore.jks
+          serverwebroot=/tmp
+          export gpghome keypass keystorepass keystore serverwebroot
+      EOF
+    - source $CI_PROJECT_DIR/variables
+    # silence warnings
+    - chmod 0600 config.yml config/*.yml config/*/*.yml
+    - chmod 0700 $gpghome
+
+    - export PATH=$CI_PROJECT_DIR:$PATH
+
+    # run signpkg.sh
+    - fdroid publish --verbose
+    - fdroid gpgsign --verbose
+    - rsync --progress repo/* $serverwebroot/
+
+    # run signindex.sh
+    - fdroid gpgsign --verbose
+    - fdroid signindex --verbose
+    - rsync --stats repo/* $serverwebroot/
+
+
+# This tests the `podman system service` auto-starting and other general podman things.
+podman system service:
+  rules:
+    - changes:
+        - .gitlab-ci.yml
+        - fdroidserver/up.py
+        - tests/test_up.py
+  image: debian:trixie-slim
+  <<: *apt-template
+  script:
+    - apt-get install
+        python3-asn1crypto
+        python3-defusedxml
+        python3-git
+        python3-pillow
+        python3-podman
+        python3-ruamel.yaml
+        python3-yaml
+    - python3 -m unittest tests/test_up.py --verbose

@@ -1,0 +1,123 @@
+include:
+  - component: $CI_SERVER_FQDN/guided-explorations/embedded/ci-components/device-cloud/device-cloud@0.1.126
+  - component: $CI_SERVER_FQDN/guided-explorations/ci-components/ultimate-auto-semversioning/ultimate-auto-semversioning@1.2.7
+  - component: $CI_SERVER_FQDN/guided-explorations/embedded/ci-components/arm-gnu-embdd-rpi-pico-sdk/rpi-pico-sdk@0.1.35
+    inputs:
+      PICOSDK_COMP_CONTAINER_TAG: 0.1.35
+  - template: Jobs/SAST.gitlab-ci.yml
+  - component: $CI_SERVER_FQDN/codesonar/components/codesonar-ci/codesonar@1.1.3
+    inputs:
+      CSONAR_ROOT_TREE: "OSS-Projects/$GITLAB_USER_LOGIN-blinky"
+      CSONAR_BUILD_COMMAND: "make -j $(nproc)"
+      BUILD_WORK_DIR: "build/pico_w/wifi/blink"  
+      CSONAR_PRESET: "-preset misrac2023"
+
+variables:
+  RUNNER_GENERATE_ARTIFACTS_METADATA: "true"
+  CI_COMPONENT_TRACE: "true"
+
+stages: [.pre, build, test, deploy, hil_test, release, .post]
+
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+      when: never
+    - if: $CI_COMMIT_BRANCH
+      when: always
+
+
+my-pico-build:
+  extends: 
+    - .rpi-pico-sdk
+    - .codesonar-build
+  before_script:
+    - |
+      mkdir build
+      cd build
+      cmake .. -DPICO_BOARD=pico_w
+      cd pico_w/wifi/blink
+      apt-get update; apt-get install -y python3-requests
+  artifacts:
+    paths:
+      - build/pico_w/wifi/blink/picow_blink.uf2
+
+create_generic_package:
+  tags:
+    - saas-linux-large-arm64
+  stage: deploy
+  image: bash
+  variables:
+    COSIGN_YES: "true"
+  id_tokens:
+    SIGSTORE_ID_TOKEN:
+      aud: sigstore
+  before_script:
+    - apk add curl cosign
+  script:
+    - |
+      if [[ "${CI_SCRIPT_TRACE}" == "true" ]] || [[ -n "${CI_DEBUG_TRACE}" ]]; then
+        echo "Debugging enabled"
+        set -xv
+      fi
+      cd build/pico_w/wifi/blink
+      echo "Signing firmware"
+      cosign sign-blob picow_blink.uf2 --bundle picow_blink.${GitVersion_LegacySemVer}.cosign.bundle
+      echo "Verifying signature"
+      cosign verify-blob picow_blink.uf2 --bundle picow_blink.${GitVersion_LegacySemVer}.cosign.bundle --certificate-identity "${CI_PROJECT_URL}//.gitlab-ci.yml@refs/heads/${CI_COMMIT_REF_NAME}" --certificate-oidc-issuer "https://gitlab.com"
+      echo "picow_blink.${GitVersion_LegacySemVer}.cosign.bundle" >> includefiles.lst      
+      echo "picow_blink.uf2" >> includefiles.lst
+      tar -czvf ${CI_PROJECT_NAME}.${GitVersion_LegacySemVer}.tar.gz -T includefiles.lst
+      echo "Signing firmware archive"
+      cosign sign-blob ${CI_PROJECT_NAME}.${GitVersion_LegacySemVer}.tar.gz --bundle ${CI_PROJECT_NAME}.${GitVersion_LegacySemVer}.tar.gz.cosign.bundle
+      echo "Verifying signature"
+      cosign verify-blob ${CI_PROJECT_NAME}.${GitVersion_LegacySemVer}.tar.gz --bundle ${CI_PROJECT_NAME}.${GitVersion_LegacySemVer}.tar.gz.cosign.bundle --certificate-identity "${CI_PROJECT_URL}//.gitlab-ci.yml@refs/heads/${CI_COMMIT_REF_NAME}" --certificate-oidc-issuer "https://gitlab.com"
+      echo "Pushing package to registry."  
+      curl --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file ${CI_PROJECT_NAME}.${GitVersion_LegacySemVer}.tar.gz ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${CI_PROJECT_NAME}/${GitVersion_LegacySemVer}/${CI_PROJECT_NAME}.${GitVersion_LegacySemVer}.tar.gz
+  artifacts:
+    name: "FirmwareBinaries"
+    paths:
+      - build/pico_w/wifi/blink/picow_blink.uf2
+      - build/pico_w/wifi/blink/picow_blink.${GitVersion_LegacySemVer}.cosign.bundle
+      - build/pico_w/wifi/blink/${CI_PROJECT_NAME}.${GitVersion_LegacySemVer}.tar.gz
+      - build/pico_w/wifi/blink/${CI_PROJECT_NAME}.${GitVersion_LegacySemVer}.tar.gz.cosign.bundle
+
+device-ci-allocate:
+  when: on_success
+  stage: hil_test
+
+hil-childpipeline:
+  stage: hil_test
+  needs:
+    - job: device-ci-allocate
+      artifacts: true
+    - job: get_unique_semversion
+      artifacts: true
+  variables:
+    RUNNER_LOCKING_PIPELINE_ID: $CI_PIPELINE_ID
+
+device-ci-deallocate:
+  needs:
+    - job: device-ci-allocate
+      artifacts: true
+    - job: hil-childpipeline
+      artifacts: true
+  stage: hil_test
+
+gitlab_release:
+  tags:
+    - saas-linux-large-arm64
+  image: registry.gitlab.com/gitlab-org/release-cli
+  stage: release
+  script:
+    - echo "running release_job for $GitVersion_LegacySemVer"
+  release:
+    name: 'Release $GitVersion_LegacySemVer'
+    description: 'Created using the release-cli $EXTRA_DESCRIPTION'
+    tag_name: '$GitVersion_LegacySemVer'
+    ref: '$CI_COMMIT_SHA'
+    assets:
+      links:
+        - name: '$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/$CI_PROJECT_NAME/$GitVersion_LegacySemVer/$CI_PROJECT_NAME.$GitVersion_LegacySemVer.tar.gz'
+          url: '$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/$CI_PROJECT_NAME/$GitVersion_LegacySemVer/$CI_PROJECT_NAME.$GitVersion_LegacySemVer.tar.gz'
+          

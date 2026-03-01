@@ -1,0 +1,34 @@
+stages:
+  - build
+  - deploy
+
+variables:
+  IMAGE_NAME: mishankiii/devops-showcase
+  IMAGE_TAG: $CI_COMMIT_SHORT_SHA
+
+build:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  before_script:
+    - docker login -u "$DOCKER_HUB_USERNAME" -p "$DOCKER_HUB_PASSWORD"
+  script:
+    - docker build -t $IMAGE_NAME:$IMAGE_TAG ./devops-showcase
+    - docker push $IMAGE_NAME:$IMAGE_TAG
+
+
+#adding deploy stage to try to update uatomatically the deployment with a new image. Full CI/CD pipeline
+
+deploy:
+  stage: deploy
+  image:
+    name: lachlanevenson/k8s-kubectl:latest
+    entrypoint: [""]
+  script:
+    - echo "$KUBE_CONFIG" | base64 -d > kubeconfig
+    - export KUBECONFIG=kubeconfig
+    - kubectl set image deployment/devops-showcase-deployment devops-showcase=mishankiii/devops-showcase:$IMAGE_TAG
+    - kubectl rollout status deployment/devops-showcase-deployment
+  only:
+    - main

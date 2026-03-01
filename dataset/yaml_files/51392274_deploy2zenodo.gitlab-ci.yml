@@ -1,0 +1,326 @@
+variables:
+  PACKAGE_REGISTRY_URL: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/deploy2zenodo-ci-template/$TAG"
+  BASE_FILE_NAME: deploy2zenodo
+  CI_FILE_URL: "$PACKAGE_REGISTRY_URL/$BASE_FILE_NAME-$TAG.yaml"
+  CI_FILE_NAME: $BASE_FILE_NAME.yaml
+  FILE_URL: "$PACKAGE_REGISTRY_URL/$BASE_FILE_NAME-$TAG"
+  FILE_NAME: $BASE_FILE_NAME
+  CITATION: CITATION.cff
+  CITATION_FILE_URL: "$PACKAGE_REGISTRY_URL/$CITATION"
+  README: README.md
+  PDFREADME: README.pdf
+  PDFREADME_URL: "$PACKAGE_REGISTRY_URL/$PDFREADME"
+
+.display_env:
+  before_script:
+    - date
+    - cat /etc/os-release
+
+pre-commit:
+  stage: build
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+    - if: $CI_PIPELINE_SOURCE == "pipeline"
+  image:
+    name: alpine:latest
+  extends: .display_env
+  script:
+    - apk add --no-cache cffconvert git jq npm pre-commit shellcheck
+    - pre-commit --version
+    - cffconvert --version
+    - pre-commit run --all-files
+    # check exit code is unique
+    - |
+      FILETOCHECK="deploy2zenodo"
+      OUT="$(grep -o -E 'exit [0-9]*' "$FILETOCHECK")"
+      if [ ! "$(echo "$OUT" | wc -l)" -eq "$(echo "$OUT" | uniq | wc -l)" ]; then
+          echo "exit code is not unique:"
+          echo "$OUT" | sort -n -t " " -k 2
+          exit 1
+      fi
+    - ./create_deploy2zenodo_gitlab_ci_pipeline
+    - cat "$CI_FILE_NAME"
+    - ./create_deploy2zenodo_script
+    - cat "$FILE_NAME.sh"
+    - md5sum "$BASE_FILE_NAME" "$CI_FILE_NAME" "$FILE_NAME.sh"
+    - shellcheck "$BASE_FILE_NAME" "$FILE_NAME.sh"
+    # to test file with pre-commit it has to be added
+    - git add -f "$FILE_NAME.sh"
+    - pre-commit run --all-files
+    - cffconvert -i "$CITATION" --validate
+    - jq < zenodo-add-related_identifiers.json
+    - jq < zenodo-merge.json
+  artifacts:
+    expire_in: 1 hrs
+    paths:
+      - $CI_FILE_NAME
+      - $FILE_NAME.sh
+
+pycodestyle_alpine:
+  stage: build
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+    - if: $CI_PIPELINE_SOURCE == "pipeline"
+  image:
+    name: alpine:latest
+  extends: .display_env
+  script:
+    - apk add --no-cache py3-pycodestyle
+    - pycodestyle --version
+    - pycodestyle --show-source --show-pep8 --statistics .
+
+check_publication_date_check:
+  stage: build
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+    - if: $CI_PIPELINE_SOURCE == "pipeline"
+  image:
+    name: alpine:latest
+  extends: .display_env
+  script:
+    - test "$(grep "RE_EDTF_LEVEL_0=" deploy2zenodo)" = "        RE_EDTF_LEVEL_0=\"$(./check_edtf_level_0)\""
+    - ./check_edtf_level_0
+    - ./check_edtf_level_0 "2024-03-28" "2024-03" "2024" "2023-10-20/2024-04-02" "2023-10-20/2024-04" "2023-10-20/2024" "2023-10/2024-04-02" "2023/2024-04-02" "2023-10/2024-04" "2023/2024"
+    - (! ./check_edtf_level_0 "2024/03/13")
+    - (! ./check_edtf_level_0 "2024-03-1")
+    - (! ./check_edtf_level_0 "2024-03-")
+    - (! ./check_edtf_level_0 "2024-0")
+    - (! ./check_edtf_level_0 "2024-")
+    - (! ./check_edtf_level_0 "2024-03-13T18:42:31.928651+00:00")
+    - (! ./check_edtf_level_0 "2024-03-13T")
+    - (! ./check_edtf_level_0 "20231020T155008")
+
+prepare_release_step1:
+  stage: build
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+    - if: $CI_PIPELINE_SOURCE == "pipeline"
+  image:
+    name: alpine:latest
+  extends: .display_env
+  script:
+    - echo "DESCRIPTION=$README" > variables.env
+    - TAG=$(sed -n 's/^.*Version:\s*\(\S*\)$/\1/p' "$BASE_FILE_NAME")
+    - echo "TAG=$TAG" >> variables.env
+    - TAG_COMMIT_TIMESTAMP=$(echo "$CI_COMMIT_TIMESTAMP" | cut -d "T" -f 1)
+    - echo "TAG_COMMIT_TIMESTAMP=$TAG_COMMIT_TIMESTAMP" >> variables.env
+    - cat variables.env
+  artifacts:
+    expire_in: 1 hrs
+    reports:
+      dotenv: variables.env
+
+prepare_release_step2:
+  stage: build
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE != "pipeline"
+  needs:
+    - job: pre-commit
+      artifacts: true
+    - job: pycodestyle_alpine
+    - job: check_publication_date_check
+    - job: prepare_release_step1
+      artifacts: true
+  inherit:
+    variables: false
+  variables:
+    STEP: "1"
+    TAG: $TAG
+    TAG_COMMIT_SHA: $CI_COMMIT_SHA
+    TAG_COMMIT_TIMESTAMP: $TAG_COMMIT_TIMESTAMP
+  trigger:
+    project: daniel_mohr/deploy_deploy2zenodo_to_zenodo
+    strategy: depend
+    forward:
+      yaml_variables: true
+      pipeline_variables: false
+
+deploy_ci_template:
+  stage: deploy
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "pipeline" && $STEP == "2"
+  needs:
+    - job: pre-commit
+      artifacts: true
+    - job: pycodestyle_alpine
+    - job: check_publication_date_check
+    - job: prepare_release_step1
+      artifacts: true
+  image:
+    name: debian:latest
+  variables:
+    DEBIAN_FRONTEND: noninteractive
+    APT_GET_INSTALL: "apt-get install --no-install-recommends -q -y"
+  extends: .display_env
+  script:
+    - apt-get update
+    - $APT_GET_INSTALL curl fonts-lmodern jq lmodern pandoc pipx texlive yq
+    - pipx install cffconvert
+    - export PATH="$PATH:~/.local/bin"
+    # $DOI and $DEPLOY2ZENODO_DEPOSITION_ID available
+    # create CITATION.cff
+    - TMPCITATION=$(mktemp)
+    - yq --yaml-output ".url = \"$CI_PROJECT_URL/-/releases/$TAG\" | .commit = \"$TAG_COMMIT_SHA\" | .version = \"$TAG\" | .\"date-released\" = \"$TAG_COMMIT_TIMESTAMP\" | .identifiers[0].description = \"The DOI of this release.\" | .identifiers[0].value = \"$DOI\" | .identifiers[0].type = \"doi\" | .doi = \"$DOI\"" "$CITATION" | tee "$TMPCITATION"
+    - mv "$TMPCITATION" "$CITATION"
+    - cffconvert -i "$CITATION" --validate
+    # create README.pdf
+    - tmpreadme=$(mktemp)
+    - sed "s 10.5281/zenodo.10112959 $DOI g" "$README" > "$tmpreadme"
+    - pandocmetadatatmpfile=$(mktemp)
+    - sed -n '/^---$/,/^---$/p' "$tmpreadme" | grep -v -e "---" | tee > "$pandocmetadatatmpfile"
+    - title=$(grep "^# " "$tmpreadme" | cut -d " " -f 2-)
+    - |
+      echo "title: \"$title\"" | tee -a "$pandocmetadatatmpfile"
+    - |
+      echo "abstract: \"deploy2zenodo is a script to deploy your data to zenodo providing automatic workflow via ci pipeline\"" | tee -a "$pandocmetadatatmpfile"
+    - keywords=$(cffconvert -i "$CITATION" -f zenodo | jq -cr '.keywords | @csv' | sed 's/"//g' | sed 's/,/, /g')
+    - |
+      echo "keywords: $keywords" | tee -a "$pandocmetadatatmpfile"
+    - grep -v "[[_TOC_]]" "$tmpreadme" | pandoc -V papersize:a4 -V colorlinks:true -V margin-left=3cm -V margin-right=3cm -V margin-top=3cm --metadata-file="$pandocmetadatatmpfile" -s --toc -f markdown -o "$PDFREADME"
+    - |
+      curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file "$CI_FILE_NAME" "$CI_FILE_URL"
+    - |
+      curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file "$FILE_NAME.sh" "$FILE_URL"
+    # upload CITATION.cff
+    - |
+      curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file "$CITATION" "$CITATION_FILE_URL"
+    # upload README.pdf
+    - |
+      curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file "$PDFREADME" "$PDFREADME_URL"
+
+release_job:
+  stage: deploy
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "pipeline" && $STEP == "2"
+  needs:
+    - job: pre-commit
+      artifacts: true
+    - job: pycodestyle_alpine
+    - job: check_publication_date_check
+    - job: prepare_release_step1
+      artifacts: true
+    - job: deploy_ci_template
+  image:
+    # https://docs.gitlab.com/ee/user/project/releases/release_cicd_examples.html#create-release-metadata-in-a-custom-script
+    registry.gitlab.com/gitlab-org/release-cli:latest
+  extends: .display_env
+  script:
+    - echo "running release_job for $TAG"
+    - wget "https://zenodo.org/badge/DOI/10.5281/zenodo.10112959.svg"
+  release:
+    name: '$BASE_FILE_NAME v$TAG'
+    description: '$DESCRIPTION'
+    tag_name: '$TAG'
+    ref: '$TAG_COMMIT_SHA'
+    assets:
+      links:
+        - name: $CI_FILE_NAME
+          filepath: /$CI_FILE_NAME
+          url: $CI_FILE_URL
+          link_type: other
+        - name: $FILE_NAME
+          filepath: /$FILE_NAME
+          url: $FILE_URL
+          link_type: other
+        - name: $CITATION
+          filepath: /$CITATION
+          url: $CITATION_FILE_URL
+          link_type: other
+        - name: $PDFREADME
+          filepath: /$PDFREADME
+          url: $PDFREADME_URL
+          link_type: other
+  artifacts:
+    paths:
+      - "zenodo.10112959.svg"
+
+post_release_job:
+  stage: deploy
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "pipeline" && $STEP == "2"
+  needs:
+    - job: pre-commit
+      artifacts: true
+    - job: pycodestyle_alpine
+    - job: check_publication_date_check
+    - job: prepare_release_step1
+      artifacts: true
+    - job: deploy_ci_template
+    - job: release_job
+  variables:
+    TAG: $TAG
+    TAG_COMMIT_SHA: $TAG_COMMIT_SHA
+    TAG_COMMIT_TIMESTAMP: $TAG_COMMIT_TIMESTAMP
+    STEP: "3"
+    DOI: $DOI
+    DEPLOY2ZENODO_DEPOSITION_ID: $DEPLOY2ZENODO_DEPOSITION_ID
+    LATESTDOI: $LATESTDOI
+    LATESTUPLOADTYPE: $LATESTUPLOADTYPE
+  trigger:
+    project: daniel_mohr/deploy_deploy2zenodo_to_zenodo
+    strategy: depend
+    forward:
+      yaml_variables: true
+      pipeline_variables: false
+
+trigger1:
+  stage: .post
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "pipeline" && $STEP == "2"
+  image:
+    name: alpine:latest
+  script:
+    - apk add --no-cache curl
+    - curl -X POST --fail -F token="${trigger_token:?}" -F ref=main "$trigger_url"
+
+trigger2:
+  stage: .post
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE != "pipeline"
+    - if: $CI_COMMIT_BRANCH == "mohr"
+  image:
+    name: alpine:latest
+  script:
+    - apk add --no-cache curl
+    - curl -X POST --fail -F token="${script_trigger_token:?}" -F ref=main -F "variables[TRIGGERSOURCE]=$CI_COMMIT_BRANCH" "$script_trigger_url"
+    - curl -X POST --fail -F token="${complex_script_trigger_token:?}" -F ref=main -F "variables[TRIGGERSOURCE]=$CI_COMMIT_BRANCH" "$complex_script_trigger_url"
+
+deploy_to_github:
+  stage: .post
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "pipeline" && $STEP == "2"
+  image:
+    name: alpine:latest
+  script:
+    - date
+    - apk add --no-cache git openssh
+    - mkdir ~/.ssh && chmod 700 ~/.ssh
+    - ssh-keyscan -H github.com >> ~/.ssh/known_hosts
+    - mv "$github_deploy_key" ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
+    - repopath=$(mktemp -d)
+    - git clone --bare --mirror "${CI_REPOSITORY_URL}" "$repopath"
+    - (cd "$repopath" && git for-each-ref --format 'delete %(refname)' refs/merge-requests)
+    - (cd "$repopath" && git for-each-ref --format 'delete %(refname)' refs/merge-requests | git update-ref --stdin)
+    - (cd "$repopath" && git for-each-ref --format 'delete %(refname)' refs/pipelines)
+    - (cd "$repopath" && git for-each-ref --format 'delete %(refname)' refs/pipelines | git update-ref --stdin)
+    - (cd "$repopath" && git push --prune --mirror git@github.com:deploy2zenodo/deploy2zenodo.git)

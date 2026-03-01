@@ -1,0 +1,62 @@
+stages:
+    - test
+    - split
+
+.test:
+    stage: test
+    before_script:
+        - echo "date.timezone = Europe/Prague" > /usr/local/etc/php/php.ini
+        - apk --update --no-cache add git make icu-dev libzip-dev
+        - docker-php-ext-install intl zip
+        - php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');" && php composer-setup.php --install-dir=/usr/local/bin --filename=composer
+        - composer install
+
+test:php-8.4:
+    extends: .test
+    image: php:8.4-alpine
+    script:
+        - make paratest
+
+test:php-8.5:
+    extends: .test
+    image: php:8.5-alpine
+    script:
+        - make test
+
+split:
+    image: debian
+    stage: split
+    only: [tags]
+    except: [branches]
+    before_script:
+        - apt update
+        - apt install -y git wget
+        # init ssh
+        - mkdir -p ~/.ssh
+        - chmod 700 ~/.ssh
+        - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
+        - echo "$SPLIT_PRIVATE_KEY" > ~/.ssh/id_ed25519
+        - chmod 600 ~/.ssh/id_ed25519
+        # download splitsh
+        - wget https://github.com/splitsh/lite/releases/download/v1.0.1/lite_linux_amd64.tar.gz
+        - tar -zxpf lite_linux_amd64.tar.gz
+        - mv splitsh-lite /usr/local/bin
+        # fetch
+        - git config --global --add safe.directory /builds/uxf/fan
+        - git fetch --unshallow || true
+        - git config --global user.email "dev@uxf.cz"
+        - git config --global user.name "uxf bot"
+    script:
+        - ./scripts/split.sh 3.x ares $CI_COMMIT_TAG
+        - ./scripts/split.sh 3.x cms $CI_COMMIT_TAG
+        - ./scripts/split.sh 3.x code-gen $CI_COMMIT_TAG
+        - ./scripts/split.sh 3.x content $CI_COMMIT_TAG
+        - ./scripts/split.sh 3.x core $CI_COMMIT_TAG
+        - ./scripts/split.sh 3.x datagrid $CI_COMMIT_TAG
+        - ./scripts/split.sh 3.x form $CI_COMMIT_TAG
+        - ./scripts/split.sh 3.x gen $CI_COMMIT_TAG
+        - ./scripts/split.sh 3.x gql $CI_COMMIT_TAG
+        - ./scripts/split.sh 3.x graphql $CI_COMMIT_TAG
+        - ./scripts/split.sh 3.x hydrator $CI_COMMIT_TAG
+        - ./scripts/split.sh 3.x security $CI_COMMIT_TAG
+        - ./scripts/split.sh 3.x storage $CI_COMMIT_TAG

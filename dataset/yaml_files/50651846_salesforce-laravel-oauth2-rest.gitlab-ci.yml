@@ -1,0 +1,34 @@
+image: chialab/php:7.3-fpm
+
+#image: php:latest
+
+cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+    - vendor/
+    - node_modules/
+
+before_script:
+    - apt-get update -yqq
+    - apt-get install git nodejs npm libcurl4-gnutls-dev libicu-dev libmcrypt-dev libvpx-dev libjpeg-dev libpng-dev libxpm-dev zlib1g-dev libfreetype6-dev libxml2-dev libexpat1-dev libbz2-dev libgmp3-dev libldap2-dev unixodbc-dev libpq-dev libsqlite3-dev libaspell-dev libsnmp-dev libpcre3-dev libtidy-dev wget -yqq
+    - wget -O /usr/local/bin/install-php-extensions https://raw.githubusercontent.com/mlocati/docker-php-extension-installer/master/install-php-extensions
+    - chmod uga+x /usr/local/bin/install-php-extensions
+    - sync
+    - install-php-extensions http mbstring pdo_mysql curl json intl gd xml zip bz2
+    - pecl install xdebug
+    - docker-php-ext-enable xdebug
+    - curl -sS https://getcomposer.org/installer | php
+    - php composer.phar install
+    - export COMPOSER_ALLOW_SUPERUSER=1
+    - export COMPOSER_MEMORY_LIMIT=-1
+    - composer install --prefer-dist --no-ansi --no-interaction --no-progress --no-scripts
+
+test:
+    stage: test
+    script:
+#        - make test
+        - 'curl --header "Job-Token: $CI_JOB_TOKEN" --data "tag=${CI_COMMIT_TAG}" "${CI_API_V4_URL}/projects/$CI_PROJECT_ID/packages/composer"'
+#    artifacts:
+#        reports:
+#            junit: punit.xml
+#        expire_in: 1 week

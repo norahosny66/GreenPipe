@@ -1,0 +1,52 @@
+---
+image: python:3.12.7
+
+stages:
+  - lint
+  - test
+
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  POETRY_CACHE_DIR: "$CI_PROJECT_DIR/.cache/poetry"
+
+
+cache:
+  - key:
+      files:
+        - poetry.lock
+        - .gitlab-ci.yml
+    paths:
+      - $PIP_CACHE_DIR
+      - $POETRY_CACHE_DIR
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+
+.poetry:
+  before_script:
+    - pip install poetry==1.8.4
+    - poetry config virtualenvs.in-project true
+    - poetry config virtualenvs.options.always-copy true # symlinked binary causes Poetry build failure
+    - poetry config cache-dir ${POETRY_CACHE_DIR}
+    - poetry config --list
+
+lint:
+  extends:
+    - .poetry
+  stage: lint
+  script:
+    - make lint
+    - poetry lock --no-update
+    - git diff --exit-code
+
+
+test:
+  extends:
+    - .poetry
+  stage: test
+  script:
+    - make test

@@ -1,0 +1,52 @@
+stages:
+  - build
+  - deploy
+
+variables:
+  # Ton chemin de registre exact identifié sur GitLab
+  REGISTRY_IMAGE: "registry.gitlab.com/portfolio-kamal-guidadou/devops-devsecops/projet-demo-devops-v1"
+  TAG_LATEST: "latest"
+
+# ÉTAPE 1 : On construit l'image du portfolio et on remplit le registre
+build_image:
+  stage: build
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker build --pull -t $REGISTRY_IMAGE:$TAG_LATEST .
+    - docker push $REGISTRY_IMAGE:$TAG_LATEST
+    # Nettoyage des images de build pour ne pas saturer le ThinkPad
+    - docker image prune -f
+
+# ÉTAPE 2 : Déploiement sur ton VPS
+deploy_production:
+  stage: deploy
+  tags:
+    - deploy_production # Utilise ton Runner sur le VPS
+  before_script:
+    - eval $(ssh-agent -s)
+    # Utilisation de ta clé SSH configurée
+    - echo "$CI_CD_SSH_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - ssh-keyscan -H 113.30.191.17 >> ~/.ssh/known_hosts
+  script:
+    - |
+      ssh kamal@113.30.191.17 "
+        cd ~/portfolio-portal &&
+        
+        # Injection de la variable d'image dans le déploiement
+        export CI_REGISTRY_IMAGE='${REGISTRY_IMAGE}' &&
+        
+        # Application des 3 fichiers séparés (Full Strict)
+        envsubst < k8s/deployment.yaml | kubectl apply -f - &&
+        kubectl apply -f k8s/portfolio-portal.yaml &&
+        kubectl apply -f k8s/portfolio-ingress.yaml &&
+        
+        # Redémarrage pour charger la nouvelle image
+        kubectl rollout restart deployment portfolio-portal-deployment -n portfolio-prod
+      "
+  only:
+    - main

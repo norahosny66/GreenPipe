@@ -1,0 +1,75 @@
+image: python:3.11
+
+# Change pip's cache directory to be inside the project directory since we can
+# only cache local items.
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+# Pip's cache doesn't store the python packages
+# https://pip.pypa.io/en/stable/reference/pip_install/#caching
+#
+# If you want to also cache the installed packages, you have to install
+# them in a virtualenv and cache it as well.
+cache:
+  paths:
+    - .cache/pip
+    - venv/
+
+before_script:
+  - python3.11 --version ;
+  - python3.11 -m venv ./venv
+  - source ./venv/bin/activate
+  - pip --version
+  - pip install --upgrade pip
+  - pip install -r requirements.txt
+  - docker login $CI_REGISTRY -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
+
+stages:
+  - static-test
+  - infra
+  - build
+  - deploy
+
+fmt_job:
+  stage: static-test
+  script:
+    - echo "Formatter check starting"
+    - ruff format --check # As a replacement for Black formatter
+    - echo "No format issues found"
+
+lint_job:
+  stage: static-test
+  script:
+    - echo "Linter check starting"
+    - ruff check # All lint check included, see pyproject.toml
+    - echo "No lint issues found"
+
+infra_job:
+  stage: infra
+  variables:
+    PROJECT_NAME: docker
+  script:
+    - echo "Infrastructure starting"
+    - docker compose -p $PROJECT_NAME -f docker-compose.yml up -d
+
+docker_build:
+  stage: build
+  only:
+    - main
+  script:
+    - echo $CI_COMMIT_SHA
+    - docker build -f ./src/inference/Dockerfile -t $CI_REGISTRY/course6123513/mlops-real-estate/inference:$CI_COMMIT_SHA .
+    - docker push $CI_REGISTRY/course6123513/mlops-real-estate/inference:$CI_COMMIT_SHA
+
+docker_deploy:
+  stage: deploy
+  only:
+    - main
+  variables:
+    PROJECT_NAME: model-serving
+  script:
+    - docker stop $(docker ps -a | grep $PROJECT_NAME | awk '{print $1}') || true
+    - docker rm $(docker ps -a | grep $PROJECT_NAME | awk '{print $1}') || true
+    - docker volume rm $(docker volume ls | grep $PROJECT_NAME | awk '{print $2}') || true
+    - echo $CI_COMMIT_SHA
+    - docker compose -p $PROJECT_NAME -f ./src/inference/docker-compose-dev.yml up -d

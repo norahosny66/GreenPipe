@@ -1,0 +1,134 @@
+stages:
+  - test
+  - build
+  - upload
+  - release
+
+variables:
+  PACKAGE_REGISTRY_URL: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/nrich/${CI_COMMIT_TAG}"
+  PACKAGE_LATEST_REGISTRY_URL: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/nrich/latest"
+
+# build-cross-image:
+#     stage: build
+#     image: docker:git
+#     services:
+#       - docker:dind
+#     script:
+#       - docker login -u gitlab-ci-token -p $CI_JOB_TOKEN registry.gitlab.com
+#       - docker build -t registry.gitlab.com/${CI_PROJECT_NAMESPACE}/nrich/rust-cross:latest .
+#       - docker push registry.gitlab.com/${CI_PROJECT_NAMESPACE}/nrich/rust-cross:latest
+#     when: manual  # This job takes time, need to trigger in UI and don't often rebuild
+
+test:
+  stage: test
+  image: registry.gitlab.com/${CI_PROJECT_NAMESPACE}/geonet-rs/rust-cross:latest  # Reuse geonet-rs cross image
+  script:
+    - rustup component add rustfmt
+    - cargo fmt --all -- --check
+    - cargo build
+    - cargo test -- --nocapture
+
+build:
+  stage: build
+  image: registry.gitlab.com/shodan-public/geonet-rs/rust-cross:latest
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - cargo install cargo-deb cargo-generate-rpm cargo-zigbuild
+    - cargo build --release
+    - cargo build --target x86_64-pc-windows-gnu --release
+    - CC=o64-clang cargo build --target x86_64-apple-darwin --release
+    - CC=oa64-clang cargo build --target aarch64-apple-darwin --release
+    - mkdir bin
+    - strip target/release/nrich
+    - mv target/release/nrich bin/nrich-${CI_COMMIT_TAG}-linux-x86_64
+    - mv target/x86_64-pc-windows-gnu/release/nrich.exe bin/nrich-${CI_COMMIT_TAG}-windows-x86_64.exe
+    - mv target/x86_64-apple-darwin/release/nrich bin/nrich-${CI_COMMIT_TAG}-darwin-x86_64
+    - mv target/aarch64-apple-darwin/release/nrich bin/nrich-${CI_COMMIT_TAG}-darwin-arm64
+    - cargo deb
+    - mv target/debian/nrich*.deb bin/nrich_${CI_COMMIT_TAG}_x86_64.deb
+    - cargo zigbuild --target x86_64-unknown-linux-musl --release
+    - strip target/x86_64-unknown-linux-musl/release/nrich
+    - cargo generate-rpm --target x86_64-unknown-linux-musl --auto-req disabled
+    - mv target/generate-rpm/nrich*.rpm bin/nrich_${CI_COMMIT_TAG}_x86_64.rpm
+    - cd bin  # Skip preserve folder structure in tar file
+    - tar cvzf nrich_${CI_COMMIT_TAG}_darwin_x86_64.tar.gz *-${CI_COMMIT_TAG}-darwin-x86_64
+    - tar cvzf nrich_${CI_COMMIT_TAG}_darwin_arm64.tar.gz *-${CI_COMMIT_TAG}-darwin-arm64
+  cache:
+    paths:
+      - target/release/
+  artifacts:
+    paths:
+      - bin
+
+upload:
+  stage: upload
+  image: curlimages/curl:latest
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - |
+        curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file bin/nrich-${CI_COMMIT_TAG}-linux-x86_64 ${PACKAGE_REGISTRY_URL}/nrich-linux-x86_64
+        curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file bin/nrich-${CI_COMMIT_TAG}-windows-x86_64.exe ${PACKAGE_REGISTRY_URL}/nrich-windows-x86_64.exe
+        curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file bin/nrich-${CI_COMMIT_TAG}-darwin-x86_64 ${PACKAGE_REGISTRY_URL}/nrich-darwin-x86_64
+        curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file bin/nrich-${CI_COMMIT_TAG}-darwin-arm64 ${PACKAGE_REGISTRY_URL}/nrich-darwin-arm64
+        curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file bin/nrich_${CI_COMMIT_TAG}_x86_64.deb ${PACKAGE_REGISTRY_URL}/nrich_${CI_COMMIT_TAG}_x86_64.deb
+        curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file bin/nrich_${CI_COMMIT_TAG}_x86_64.rpm ${PACKAGE_REGISTRY_URL}/nrich_${CI_COMMIT_TAG}_x86_64.rpm
+        curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file bin/nrich_${CI_COMMIT_TAG}_darwin_x86_64.tar.gz ${PACKAGE_REGISTRY_URL}/nrich_darwin_x86_64.tar.gz
+        curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file bin/nrich_${CI_COMMIT_TAG}_darwin_arm64.tar.gz ${PACKAGE_REGISTRY_URL}/nrich_darwin_arm64.tar.gz
+        curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file bin/nrich-${CI_COMMIT_TAG}-linux-x86_64 ${PACKAGE_LATEST_REGISTRY_URL}/nrich-linux-x86_64
+        curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file bin/nrich-${CI_COMMIT_TAG}-windows-x86_64.exe ${PACKAGE_LATEST_REGISTRY_URL}/nrich-windows-x86_64.exe
+        curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file bin/nrich-${CI_COMMIT_TAG}-darwin-x86_64 ${PACKAGE_LATEST_REGISTRY_URL}/nrich-darwin-x86_64
+        curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file bin/nrich-${CI_COMMIT_TAG}-darwin-arm64 ${PACKAGE_LATEST_REGISTRY_URL}/nrich-darwin-arm64
+        curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file bin/nrich_${CI_COMMIT_TAG}_x86_64.deb ${PACKAGE_LATEST_REGISTRY_URL}/nrich_latest_x86_64.deb
+        curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file bin/nrich_${CI_COMMIT_TAG}_x86_64.rpm ${PACKAGE_LATEST_REGISTRY_URL}/nrich_latest_x86_64.rpm
+        curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file bin/nrich_${CI_COMMIT_TAG}_darwin_x86_64.tar.gz ${PACKAGE_LATEST_REGISTRY_URL}/nrich_latest_darwin_x86_64.tar.gz
+        curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file bin/nrich_${CI_COMMIT_TAG}_darwin_arm64.tar.gz ${PACKAGE_LATEST_REGISTRY_URL}/nrich_latest_darwin_arm64.tar.gz
+
+homebrew:
+  stage: release
+  image: rust:latest
+  variables:
+    TAP_REPOSITORY_URL: "https://gitlab-ci-push-token:${CI_PUSH_TOKEN}@gitlab.com/shodan-public/homebrew-shodan.git"
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - x86_64_sha=`sha256sum bin/nrich_${CI_COMMIT_TAG}_darwin_x86_64.tar.gz | awk '{ print $1 }'`
+    - arm64_sha=`sha256sum bin/nrich_${CI_COMMIT_TAG}_darwin_arm64.tar.gz | awk '{ print $1 }'`
+    - git clone $TAP_REPOSITORY_URL && cd homebrew-shodan
+    # Update two brew package checksums
+    - sed -i "s/sha256 \".*\"/sha256 \"$x86_64_sha\"/1" Formula/nrich.rb
+    - sed -i -z "s/sha256 \".*\"/sha256 \"$arm64_sha\"/m2" Formula/nrich.rb
+    - sed -i "s/version \".*\"/version \"$CI_COMMIT_TAG\"/g" Formula/nrich.rb
+    - git add .
+    - git -c user.email="${GITLAB_USER_EMAIL}" -c user.name="${GITLAB_USER_NAME}" commit -m "Release nrich ${CI_COMMIT_TAG}"
+    - git --no-pager show HEAD
+    - git push $TAP_REPOSITORY_URL HEAD:main
+
+release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  rules:
+    - if: $CI_COMMIT_TAG
+  release:
+    name: "Release $CI_COMMIT_TAG"
+    description: '$DESCRIPTION'
+    tag_name: '$CI_COMMIT_TAG'
+    ref: '$CI_COMMIT_TAG'
+    assets:
+      links:
+        - name: 'nrich-linux-x86_64'
+          url: "$PACKAGE_REGISTRY_URL/nrich-linux-x86_64"
+        - name: 'nrich-windows-x86_64.exe'
+          url: "$PACKAGE_REGISTRY_URL/nrich-windows-x86_64.exe"
+        - name: 'nrich-darwin-x86_64'
+          url: "$PACKAGE_REGISTRY_URL/nrich-darwin-x86_64"
+        - name: 'nrich-darwin-arm64'
+          url: "$PACKAGE_REGISTRY_URL/nrich-darwin-arm64"
+        - name: "nrich_${CI_COMMIT_TAG}_x86_64.deb"
+          url: "$PACKAGE_REGISTRY_URL/nrich_${CI_COMMIT_TAG}_x86_64.deb"
+        - name: "nrich_${CI_COMMIT_TAG}_x86_64.rpm"
+          url: "$PACKAGE_REGISTRY_URL/nrich_${CI_COMMIT_TAG}_x86_64.rpm"
+  script:
+    - echo "Creating a release for $CI_COMMIT_TAG"
+  

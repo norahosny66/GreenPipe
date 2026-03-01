@@ -1,0 +1,21 @@
+stages:
+- build
+- deploy
+- test
+- data
+- e2e
+- security
+
+variables:
+  IMAGE_TAG: "$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA"
+  JWT_SECRET: test
+  CI_API_V4_URL: https://gitlab.com/api/v4
+  CI_PROJECT_ID: 20352213
+
+include:
+- "/.gitlab/ci/build.yaml"
+- "/.gitlab/ci/deploy.yaml"
+- "/.gitlab/ci/test.yaml"
+- "/.gitlab/ci/data.yaml"
+- "/.gitlab/ci/e2e.yaml"
+- "/.gitlab/ci/security.yaml"

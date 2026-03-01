@@ -1,0 +1,121 @@
+﻿# ══════════════════════════════════════════════════════════════════════════════
+# .gitlab-ci.yml
+# Medtronic Azure XT DR MRI Integration — CI/CD Pipeline
+# ══════════════════════════════════════════════════════════════════════════════
+image: python:3.12-slim
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  PYTHONPATH: "$CI_PROJECT_DIR"
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
+
+cache:
+  paths:
+    - .cache/pip
+    - venv/
+
+before_script:
+  - python -m venv venv
+  - source venv/bin/activate
+  - pip install --upgrade pip
+  - pip install -r requirements.txt
+  - pip install flake8 black mypy
+
+stages:
+  - lint
+  - unit
+  - integration
+  - artifacts
+
+flake8:
+  stage: lint
+  script:
+    - echo "Running flake8 linter..."
+    - flake8 app/ --max-line-length=120 --exclude=__pycache__ --statistics
+  allow_failure: false
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+black:
+  stage: lint
+  script:
+    - echo "Checking code formatting with black..."
+    - black --check --diff app/ tests/
+  allow_failure: true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+mypy:
+  stage: lint
+  script:
+    - echo "Running mypy type checks..."
+    - mypy app/ --ignore-missing-imports --no-strict-optional
+  allow_failure: true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+unit-tests:
+  stage: unit
+  script:
+    - echo "Running pytest unit + integration tests..."
+    - pytest tests/ -v --tb=short --junitxml=reports/junit.xml
+    - echo "All tests passed"
+  artifacts:
+    when: always
+    reports:
+      junit: reports/junit.xml
+    paths:
+      - reports/
+    expire_in: 30 days
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+integration-tests:
+  stage: integration
+  script:
+    - echo "Starting FastAPI server..."
+    - pip install uvicorn httpx fastapi
+    - uvicorn app.main:app --host 0.0.0.0 --port 8000 &
+    - SERVER_PID=$!
+    - sleep 4
+    - echo "Running end-to-end endpoint checks..."
+    - python test_endpoints.py
+    - echo "All endpoint checks passed"
+    - kill $SERVER_PID
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+generate-ecg-strip:
+  stage: artifacts
+  script:
+    - pip install wfdb
+    - mkdir -p docs
+    - python ecg_visualizer.py --demo --record 203 --output docs/ecg_rhythm_strip.html
+    - echo "ECG strip generated"
+  artifacts:
+    paths:
+      - docs/ecg_rhythm_strip.html
+    expire_in: 90 days
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+generate-compliance-doc:
+  stage: artifacts
+  script:
+    - mkdir -p docs
+    - python generate_compliance_attachment.py --patient-id "synthea-pt-001" --report-id "RPT-$CI_PIPELINE_IID" --output docs/compliance_attachment.html
+    - echo "Compliance document generated"
+  artifacts:
+    paths:
+      - docs/compliance_attachment.html
+    expire_in: 90 days
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'

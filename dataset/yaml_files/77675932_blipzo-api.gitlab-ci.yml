@@ -1,0 +1,165 @@
+stages:
+  - build
+  - deploy
+
+workflow:
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "dev"'
+    - when: never
+
+build_image:
+  stage: build
+  image: docker:25
+  services:
+    - name: docker:25-dind
+      alias: docker
+  variables:
+    DOCKER_TLS_CERTDIR: ""
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - docker build -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG" -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" .
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG"
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "dev"'
+
+.deploy_template:
+  stage: deploy
+  image: alpine:3.19
+  needs: ["build_image"]
+  before_script:
+    - apk add --no-cache openssh-client rsync bash
+    - |
+        echo "SSH_HOST=$SSH_HOST"
+        echo "SSH_PORT=$SSH_PORT"
+        if [ -n "${SSH_USER:-}" ]; then
+          echo "SSH_USER set? yes"
+        else
+          echo "SSH_USER set? no"
+        fi
+        echo "SSH_PRIVATE_KEY length: ${#SSH_PRIVATE_KEY}"
+        echo "STG_ENV_FILE_B64 length: ${#STG_ENV_FILE_B64}"
+        echo "PROD_ENV_FILE_B64 length: ${#PROD_ENV_FILE_B64}"
+        if [ -z "${IMAGE:-}" ]; then
+          IMAGE="${CI_REGISTRY_IMAGE}:${CI_COMMIT_REF_SLUG}"
+        fi
+        export IMAGE
+        echo "IMAGE set? $( [ -n \"$IMAGE\" ] && echo yes || echo no )"
+        if [ -z "${SSH_PORT:-}" ] || ! echo "$SSH_PORT" | grep -Eq '^[0-9]+$'; then
+          echo "Invalid SSH_PORT: $SSH_PORT" >&2
+          exit 1
+        fi
+    - mkdir -p ~/.ssh
+    - |
+        (printf '%s' "$SSH_PRIVATE_KEY" | base64 -d > ~/.ssh/id_ed25519) 2>/dev/null \
+          || printf '%s' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+    - chmod 600 ~/.ssh/id_ed25519
+    - ssh-keyscan -H -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+    - export SSH_OPTS="-i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes"
+  script:
+    - |
+        ssh $SSH_OPTS -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "sudo mkdir -p '$APP_DIR' && sudo chown '$SSH_USER:$SSH_USER' '$APP_DIR'"
+    - |
+        rsync -az --delete \
+          --exclude '.git' \
+          --exclude 'node_modules' \
+          --exclude '.github' \
+          --exclude '.gitlab-ci.yml' \
+          --exclude '.env' \
+          ./ "$SSH_USER@$SSH_HOST:$APP_DIR/" -e "ssh $SSH_OPTS -p $SSH_PORT"
+    - |
+        if [ -n "${ENV_FILE_B64:-}" ]; then
+          printf '%s' "$ENV_FILE_B64" | base64 -d | ssh $SSH_OPTS -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "cat > '$APP_DIR/.env'"
+        fi
+    - |
+        ssh $SSH_OPTS -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "APP_DIR='$APP_DIR' SSH_USER='$SSH_USER' IMAGE='$IMAGE' REGISTRY='$CI_REGISTRY' REGISTRY_USER='$CI_REGISTRY_USER' REGISTRY_PASSWORD='$CI_REGISTRY_PASSWORD' COMPOSE_PROJECT_NAME='$COMPOSE_PROJECT_NAME' bash -s" <<'EOF'
+        set -euo pipefail
+
+        APP_DIR="${APP_DIR:-/var/www/blipzo-api}"
+        IMAGE="${IMAGE:-}"
+        REGISTRY="${REGISTRY:-}"
+        REGISTRY_USER="${REGISTRY_USER:-}"
+        REGISTRY_PASSWORD="${REGISTRY_PASSWORD:-}"
+        COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-}"
+        export IMAGE
+        sudo mkdir -p "$APP_DIR"
+        sudo chown "$SSH_USER:$SSH_USER" "$APP_DIR"
+        cd "$APP_DIR"
+
+        if ! command -v docker >/dev/null 2>&1; then
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl gnupg
+          sudo install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+        fi
+
+        if docker compose version >/dev/null 2>&1; then
+          DC="docker compose"
+        elif command -v docker-compose >/dev/null 2>&1; then
+          DC="docker-compose"
+        else
+          echo "Docker Compose not available" >&2
+          exit 1
+        fi
+
+        NPM_NET_NAME="${NPM_NET_NAME:-npm_default}"
+        if ! docker network inspect "$NPM_NET_NAME" >/dev/null 2>&1; then
+          docker network create --driver bridge "$NPM_NET_NAME"
+        fi
+
+        DEFAULT_PROJECT_NAME="$(basename "$APP_DIR")"
+        EXPECTED_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$DEFAULT_PROJECT_NAME}"
+        INTERNAL_NET_NAME="${INTERNAL_NET_NAME:-${EXPECTED_PROJECT_NAME}_blipzo_internal}"
+        if docker network inspect "$INTERNAL_NET_NAME" >/dev/null 2>&1; then
+          LABEL_NETWORK="$(docker network inspect -f '{{index .Labels "com.docker.compose.network"}}' "$INTERNAL_NET_NAME" 2>/dev/null || true)"
+          LABEL_PROJECT="$(docker network inspect -f '{{index .Labels "com.docker.compose.project"}}' "$INTERNAL_NET_NAME" 2>/dev/null || true)"
+          if [ "$LABEL_NETWORK" != "blipzo_internal" ] || [ "$LABEL_PROJECT" != "$EXPECTED_PROJECT_NAME" ]; then
+            for container_id in $(docker network inspect -f '{{range $id, $_ := .Containers}}{{println $id}}{{end}}' "$INTERNAL_NET_NAME"); do
+              docker rm -f "$container_id"
+            done
+            docker network rm "$INTERNAL_NET_NAME"
+          fi
+        fi
+
+        if [ -n "$REGISTRY" ] && [ -n "$REGISTRY_USER" ] && [ -n "$REGISTRY_PASSWORD" ]; then
+          echo "$REGISTRY_PASSWORD" | docker login -u "$REGISTRY_USER" --password-stdin "$REGISTRY"
+        fi
+
+        if [ -n "$COMPOSE_PROJECT_NAME" ]; then
+          IMAGE="$IMAGE" $DC -p "$COMPOSE_PROJECT_NAME" -f docker-compose.yml pull
+          IMAGE="$IMAGE" $DC -p "$COMPOSE_PROJECT_NAME" -f docker-compose.yml up -d
+        else
+          IMAGE="$IMAGE" $DC -f docker-compose.yml pull
+          IMAGE="$IMAGE" $DC -f docker-compose.yml up -d
+        fi
+        docker image prune -f
+        EOF
+
+deploy_stg:
+  extends: .deploy_template
+  environment:
+    name: stg
+  resource_group: blipzo-api-stg
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+  variables:
+    APP_DIR: /var/www/blipzo-api-staging
+    ENV_FILE_B64: $STG_ENV_FILE_B64
+    IMAGE: $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG
+    COMPOSE_PROJECT_NAME: blipzo-stg
+
+deploy_prod:
+  extends: .deploy_template
+  environment:
+    name: prod
+  resource_group: blipzo-api-prod
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  variables:
+    APP_DIR: /var/www/blipzo-api
+    ENV_FILE_B64: $PROD_ENV_FILE_B64
+    IMAGE: $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG
+    COMPOSE_PROJECT_NAME: blipzo-prod

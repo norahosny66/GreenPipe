@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright 2022 EDF (Électricité de France S.A.)
+# SPDX-License-Identifier: BSD-3-Clause
+# See README for all details on copyright, authorship and license.
+
+pages:
+  image: docker.io/rustdocker/rust:nightly
+  script:
+    - rustup target add thumbv7em-none-eabihf --toolchain nightly
+    - apt-get update && apt-get install -y wget unzip srecord libclang-dev gcc-arm-none-eabi
+    - sh -x ./build-hexfiles.sh
+    - mkdir public
+    - |
+      cat > public/index.html <<EOF
+      <!DOCTYPE html>
+      <html>
+      <head>
+      <title>CoAP/ACE PoC: Firmware download</title>
+      <style>
+      html { font-family: sans-serif; }
+      .hash { display: inline; font-family: monospace; color: gray; }
+      .hash summary::before { content: ">" }
+      .hash[open] summary::before { content: "<" }
+      .hash summary { display: inline; margin-left: 1em; font-family: sans-serif; }
+      </style>
+      </head>
+      <body>
+      <h1>CoAP/ACE PoC: Firmware download</h1>
+      <p>Available files:</p>
+      <ul>
+      EOF
+      for f in $(cd images; echo *.hex); do
+        echo '<li><a href="images/'$f'" download>'$f'</a> <details class="hash"><summary>SHA256sum</summary> '`sha256sum images/$f | cut -d" " -f1`'</li>' >> public/index.html
+      done
+      cat >> public/index.html <<EOF
+      </ul>
+      <footer>
+      <p>Built from version `git describe --always`.</p>
+      <p>Please refer to the
+      <a href="https://gitlab.com/oscore/coap-ace-poc-firmware/-/blob/main/README.md">project REAMDE file</a>
+      for context, license information and usage instructions.</p>
+      </footer>
+      </body>
+      </html>
+      EOF
+    - mv images public/
+
+    - cargo +nightly doc --no-deps
+    - mv target/thumbv7em-none-eabihf/doc public/doc
+  artifacts:
+    paths:
+      - public
+
+reuse:
+  image: python:3
+  script:
+    - pip install reuse
+    - reuse lint

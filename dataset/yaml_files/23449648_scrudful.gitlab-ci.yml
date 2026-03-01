@@ -1,0 +1,47 @@
+image: continuumio/miniconda3:latest
+
+before_script:
+  - conda install -c conda-forge make sphinx django sphinx_rtd_theme
+
+pages:
+  script:
+  - mkdir -p public
+  - cd docs
+  - make clean
+  - make html
+  - cp -r build/html/* ../public/.
+  artifacts:
+    paths:
+      - public
+  only:
+    refs:
+    - master
+    - merge_requests
+    changes:
+    - docs
+
+publish:
+  before_script:
+    - conda install -c conda-forge poetry
+    - git config --global user.name "Gitlab CI/CD"
+    - git config --global user.email "CICD@gitlab.com"
+
+  script:
+    - poetry config http-basic.pypi "__token__" "${POETRY_PYPI_ACCESS_TOKEN}"
+    - poetry version patch
+    - poetry build
+    - poetry publish
+    - git status
+    - git add .
+    - git commit -m "[ci skip] updated to $(poetry version)"
+    - git push -o ci-skip http://root:$PROJECT_ACCESS_TOKEN@gitlab.com/openteams/scrudful HEAD:master
+  artifacts:
+    paths:
+    - dist
+  only:
+    refs:
+    - master
+    - merge_requests
+    changes:
+    - scrudful
+

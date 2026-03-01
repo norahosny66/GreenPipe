@@ -1,0 +1,25 @@
+include:
+  - component: gitlab.com/tickett/components/aws-terraform/aws-terraform@$CI_COMMIT_SHA
+    inputs:
+      tf_root: ${CI_PROJECT_DIR}/terraform
+    rules:
+      - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      - if: $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH
+
+release:
+  stage: deploy
+  image: registry.gitlab.com/gitlab-org/release-cli
+  variables:
+    CHANGELOG_FILE: CHANGELOG.md
+  before_script:
+    - apk add jq curl
+  script:
+    - |
+      uri="$CI_API_V4_URL/projects/$CI_PROJECT_ID/repository/changelog?version=$CI_COMMIT_TAG"
+      curl --silent $uri | jq -r '.notes' > $CHANGELOG_FILE
+      cat $CHANGELOG_FILE
+  release:
+    tag_name: $CI_COMMIT_TAG
+    description: $CHANGELOG_FILE
+  rules:
+    - if: $CI_COMMIT_TAG

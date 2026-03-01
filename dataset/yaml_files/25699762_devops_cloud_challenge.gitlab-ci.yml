@@ -1,0 +1,137 @@
+variables:
+  TF_ROOT: ${CI_PROJECT_DIR}
+  TF_ADDRESS: ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/${CI_PROJECT_NAME}
+  AWS_ACCESS_KEY_ID: ${K8S_SECRET_AWS_ACCESS_KEY_ID}
+  AWS_SECRET_ACCESS_KEY: ${K8S_SECRET_AWS_SECRET_ACCESS_KEY}
+
+cache:
+  key: ${CI_PROJECT_NAME}
+  paths:
+    - ${TF_ROOT}/.terraform
+
+before_script:
+  - cd ${TF_ROOT}
+
+stages:
+  - prepare
+  - validate
+  - plan
+  - request_approval
+  - deploy
+  - notify_deploy
+  - notify_if_failure
+  - verify_deploy_and_notify
+  - check_services
+
+# Verify environments can be built
+init_terraform:
+  image: registry.gitlab.com/gitlab-org/terraform-images/stable:latest
+  stage: prepare
+  script:
+    - ./gitlab-terraform.sh init
+
+# Verify environments can be built
+init_python:
+  image: python:3.7
+  stage: prepare
+  script:
+    - pip install -r requirements.txt
+
+# Validate Terraform files
+validate_terraform:
+  image: registry.gitlab.com/gitlab-org/terraform-images/stable:latest
+  stage: validate
+  script:
+    - ./gitlab-terraform.sh init
+    - ./gitlab-terraform.sh validate
+
+# Validate compliance of request and store the report for future reference
+validate_compliance:
+  image: python:3.7
+  stage: validate
+  script:
+    - pip install -r requirements.txt
+    - python scripts/validate_compliance.py
+  artifacts:
+    paths:
+      - ${TF_ROOT}/compliance.txt
+
+# Create Terraform plan and store it for future reference
+plan:
+  image: registry.gitlab.com/gitlab-org/terraform-images/stable:latest
+  stage: plan
+  script:
+    - ./gitlab-terraform.sh plan -target=aws_security_group.custom_sg_public -target=aws_security_group.custom_sg_private
+    - ./gitlab-terraform.sh plan-txt -target=aws_security_group.custom_sg_public -target=aws_security_group.custom_sg_private
+  artifacts:
+    paths:
+      - ${TF_ROOT}/plan.cache
+      - ${TF_ROOT}/plan.txt
+    reports:
+      terraform: ${TF_ROOT}/plan.txt
+
+# Send notifications via Slack
+notify_slack:
+  image: curlimages/curl
+  stage: request_approval
+  script:
+    - curl -F title='Compliance report' -F initial_comment="*Deploy Request* ${CI_COMMIT_SHORT_SHA} - ${CI_COMMIT_TITLE}" --form-string channels=gitlab-aws-sec-rules -F file=@${TF_ROOT}/compliance.txt -F filename=compliance-${CI_COMMIT_REF_SLUG}.txt -F token=${SLACK_OAUTH_TOKEN} https://slack.com/api/files.upload
+    - curl -F title='Terraform Plan' -F initial_comment="Deploy Request ${CI_COMMIT_SHORT_SHA} - ${CI_COMMIT_TITLE} - *APPROVE DEPLOY* at ${CI_PIPELINE_URL}" --form-string channels=gitlab-aws-sec-rules -F file=@${TF_ROOT}/plan.txt -F filename=plan.txt -F token=${SLACK_OAUTH_TOKEN} https://slack.com/api/files.upload
+  dependencies:
+    - validate_compliance
+    - plan
+  only:
+    - master
+
+# Requires manual approval
+apply:
+  image: registry.gitlab.com/gitlab-org/terraform-images/stable:latest
+  stage: deploy
+  script:
+    - ./gitlab-terraform.sh apply -target=aws_security_group.custom_sg_public -target=aws_security_group.custom_sg_private -auto-approve
+  dependencies:
+    - plan
+  when: manual
+  allow_failure: false
+  only:
+    - master
+
+# Notify deployment has finished
+notify_deploy:
+  image: curlimages/curl
+  stage: notify_deploy
+  script:
+    - curl -X POST -d "token=${SLACK_OAUTH_TOKEN}&channel=#gitlab-aws-sec-rules&text=Deploy Request ${CI_COMMIT_SHORT_SHA} - ${CI_COMMIT_TITLE} - *APPROVED* and *DEPLOYED*" https://slack.com/api/chat.postMessage
+  only:
+    - master
+
+# Verify consistency between the terraform states and AWS
+verify_and_notify:
+  image: python:3.7
+  stage: verify_deploy_and_notify
+  script:
+    - pip install -r requirements.txt
+    - curl --header "Private-Token:${CI_USER_TOKEN}" --request GET "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/${CI_PROJECT_NAME}" > terraform.tfstate.json
+    - python scripts/verify_and_notify.py
+    - curl -F title='Report' -F initial_comment="Consistency check Terraform AWS - ${CI_COMMIT_SHORT_SHA} - ${CI_COMMIT_TITLE}" --form-string channels=gitlab-aws-sec-rules -F file=@${TF_ROOT}/consistency.txt -F filename=consistency-${CI_COMMIT_REF_SLUG}.txt -F token=${SLACK_OAUTH_TOKEN} https://slack.com/api/files.upload
+  only:
+    - master
+
+notify_if_failure:
+  image: curlimages/curl
+  stage: notify_if_failure
+  when: on_failure
+  script:
+    - curl -X POST -d "token=${SLACK_OAUTH_TOKEN}&channel=#gitlab-aws-sec-rules&text=Deploy Request ${CI_COMMIT_SHORT_SHA} - ${CI_COMMIT_TITLE} - *FAILED* - Check pipeline at ${CI_PIPELINE_URL}" https://slack.com/api/chat.postMessage
+  only:
+    - master
+
+verify_aws_services_reachability:
+  stage: check_services
+  variables:
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+  trigger:
+    include: test-pipeline/verify-aws-services-gitlab-ci.yml
+  only:
+    - master

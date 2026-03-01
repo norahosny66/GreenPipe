@@ -1,0 +1,123 @@
+stages:
+  - Build and test
+  - Build
+  - Deploy
+  - Review
+
+Frontend unit test:
+  stage: Build and test
+  image: node:20-alpine3.20
+  script:
+  - npm install
+  - npm run testtofile
+  coverage: /All files[^|]*\|[^|]*\s+([\d\.]+)/
+  artifacts:
+    reports:
+      junit: ./junit.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: ./coverage/cobertura-coverage.xml
+
+Frontend lint check:
+  stage: Build and test
+  image: node:20-alpine3.20
+  script:
+    - npm install
+    - npm run lint
+
+Frontend image build:
+  stage: Build and test
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  script:
+    - export NORMALIZED_BRANCH=$(echo $CI_COMMIT_BRANCH | sed -e 's/[^[:alnum:]]//g' | cut -c -29)
+    - echo $NORMALIZED_BRANCH
+    - echo NORMALIZED_BRANCH=$NORMALIZED_BRANCH > build.env
+    - cat build.env
+    - >-
+      /kaniko/executor
+      --context "."
+      --dockerfile "./dockerfile"
+      --destination docker-registry-emotoagh-service.default/front:$NORMALIZED_BRANCH
+      --skip-tls-verify
+  artifacts:
+    reports:
+      dotenv: build.env
+
+Prepare frontend review deploy:
+  stage: Review
+  only:
+    - branches
+  except:
+    - master
+    - dev
+    - tags
+  needs:
+    - job: Frontend image build
+      artifacts: true
+  variables:
+    NORMALIZED_BRANCH: f-$NORMALIZED_BRANCH
+    FRONTEND_IMAGE: front:$NORMALIZED_BRANCH
+    UPSTREAM_BRANCH: $CI_COMMIT_BRANCH
+  trigger: 
+    project: spectrumagh/webappteam/deployments-WebApp
+    branch: dev
+
+Dev build:
+  stage: Build
+  only:
+    - dev
+  needs:
+    - Frontend unit test
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  script:
+    - >-
+      /kaniko/executor
+      --context "."
+      --dockerfile "./dockerfile"
+      --destination docker-registry-emotoagh-service.default/front:dev
+      --skip-tls-verify
+
+Dev deploy trigger:
+  stage: Deploy
+  only:
+    - dev
+  needs:
+    - Dev build
+  variables:
+    UPSTREAM_BRANCH: $CI_COMMIT_BRANCH
+  trigger: 
+    strategy: depend
+    project: spectrumagh/webappteam/deployments-WebApp
+    branch: dev # upstream and downstream branches are the same 
+
+Production build:
+  stage: Build
+  only:
+  - tags
+  needs:
+    - Frontend unit test
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  script:
+      /kaniko/executor
+      --context "."
+      --dockerfile "./dockerfile"
+      --destination docker-registry-emotoagh-service.default/front:$CI_COMMIT_TAG
+      --destination docker-registry-emotoagh-service.default/front
+      --skip-tls-verify
+
+Production deploy trigger:
+  stage: Deploy
+  only:
+  - tags
+  needs:
+    - Production build
+  trigger: 
+    strategy: depend
+    project: spectrumagh/webappteam/deployments-WebApp
+    branch: master

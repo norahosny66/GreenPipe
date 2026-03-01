@@ -1,0 +1,36 @@
+stages:
+  - validate
+  - plan
+  - apply
+
+variables:
+  TF_VERSION: "1.6.6"
+  TF_ROOT: "."  # or set to where main.tf lives if nested
+
+default:
+  image:
+    name: hashicorp/terraform:$TF_VERSION
+    entrypoint: [""]
+  before_script:
+    - terraform --version
+    - cd $TF_ROOT
+    - terraform init -input=false
+
+validate:
+  stage: validate
+  script:
+    - terraform validate
+
+plan:
+  stage: plan
+  script:
+    - terraform plan -out=tfplan
+  artifacts:
+    paths:
+      - tfplan
+
+apply:
+  stage: apply
+  script:
+    - terraform apply -input=false tfplan
+  when: manual

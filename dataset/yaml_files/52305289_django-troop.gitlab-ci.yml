@@ -1,0 +1,41 @@
+---
+variables:
+  # Improve caching speed.
+  FF_USE_FASTZIP: "true"
+  ARTIFACT_COMPRESSION_LEVEL: fastest
+  CACHE_COMPRESSION_LEVEL: fastest
+  TRANSFER_METER_FREQUENCY: 15s
+
+default:
+  image: python:3.12.4-bullseye
+  before_script:
+    # Install just.
+    - curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh > just.sh
+    - bash just.sh --to /usr/local/bin
+
+    # Show versions for debugging.
+    - echo "Tool versions:"
+    - python -V
+    - just --version
+
+pre-commit:
+  # Cache pre-commit environments for speed.
+  variables:
+    PRE_COMMIT_HOME: ${CI_PROJECT_DIR}/.cache/pre-commit
+  cache:
+    key:
+      files:
+        - .pre-commit-config.yaml
+    paths:
+      - ${PRE_COMMIT_HOME}
+  script:
+    - pip install pre-commit
+    # We run the unit tests in a separate job, since it requires more
+    # dependencies and will take longer.
+    - export SKIP=test-django-troop
+    - just run-pre-commit --all-files --hook-stage pre-push -v
+
+test:
+  script:
+    - pip install -r django_troop/requirements.txt
+    - just test

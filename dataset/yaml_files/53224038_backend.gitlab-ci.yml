@@ -1,0 +1,58 @@
+stages:
+  - test
+  - containerize
+  - release
+  - verify
+
+cache:
+  paths:
+    - .cache/pip
+    - venv
+
+include:
+  - remote: https://gitlab.com/TIBHannover/gitlab-ci-templates/raw/master/templates/Docker.gitlab-ci.yml
+  - template: Jobs/Dependency-Scanning.gitlab-ci.yml
+  - template: Jobs/Container-Scanning.gitlab-ci.yml
+  - template: Jobs/Secret-Detection.gitlab-ci.yml
+
+test-api:
+  stage: test
+  image: python:3.11
+  variables:
+    VERBOSE: "True"
+  before_script:
+    - pip install poetry
+    - poetry install --no-root
+    - source `poetry env info --path`/bin/activate
+  script:
+    - pytest
+
+version_and_release:
+  stage: release
+  image: python:3.11
+  variables:
+    GIT_DEPTH: 0
+  only:
+    - main
+  before_script:
+    - pip install https://github.com/aborsu/other-semantic-release/archive/gitlab-ci.zip
+    - pip install poetry
+  script:
+    - git checkout "$CI_COMMIT_REF_NAME"
+    - poetry install --no-root
+    - source `poetry env info --path`/bin/activate
+    - semantic-release -v version && semantic-release publish
+
+container_scanning:
+    stage: verify
+    variables:
+        # Change image name to match our repository naming convention
+        CI_APPLICATION_REPOSITORY: $CI_REGISTRY_IMAGE
+
+dependency_scanning:
+    stage: verify
+
+secret_detection:
+    variables:
+        SECRET_DETECTION_EXCLUDED_PATHS: "*.pyc,__pycache__,*.egg-info,.venv,venv,.cache"
+        SECRET_DETECTION_HISTORIC_SCAN: "true"

@@ -1,0 +1,76 @@
+stages:
+  - code_quality
+  - build
+  - release
+
+variables:
+  NODE_ENV: "production"
+  EXECUTABLE_BASE_NAME: "Honest DJ Lib Manager"
+
+# -------------------------------
+# 1️⃣ Code Quality
+# -------------------------------
+code_quality:
+  stage: code_quality
+  image: node:20-alpine
+  script:
+    - npm ci
+    - npx prettier --check "src/**/*.ts" --config .prettierrc --ignore-unknown
+  only:
+    - merge_requests
+    - main
+
+# -------------------------------
+# 2️⃣ Build Binaries
+# -------------------------------
+build_binaries:
+  stage: build
+  image: node:20
+  before_script:
+    - npm ci --include=dev
+    - npm install -g typescript@^5.9.0
+
+  script:
+    # Compile TS → dist/
+    - ./node_modules/.bin/tsc
+    # Générer les binaires pkg
+    - npm run build:bin
+  artifacts:
+    paths:
+      - executables/
+    expire_in: 1 week
+  only:
+    - tags
+    - main
+
+# -------------------------------
+# 3️⃣ Release
+# -------------------------------
+release:
+  stage: release
+  image: node:20-alpine
+  dependencies:
+    - build_binaries
+  script:
+    - apk add --no-cache curl jq
+    # Install GitLab release CLI (optional: can use curl)
+    - echo "Creating GitLab release..."
+    - |
+      DESCRIPTION=$(echo "$CI_COMMIT_TAG_MESSAGE" | jq -Rs .)
+      curl --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+           --header "Content-Type: application/json" \
+           --data "{
+             \"name\": \"Release $CI_COMMIT_TAG\",
+             \"tag_name\": \"$CI_COMMIT_TAG\",
+             \"description\": $DESCRIPTION,
+             \"assets\": {
+               \"links\": [
+                 {\"name\": \"Windows\", \"url\": \"$CI_API_V4_URL/projects/$CI_PROJECT_ID/jobs/artifacts/$CI_COMMIT_REF_NAME/raw/executables/$EXECUTABLE_BASE_NAME.exe?job=build_binaries\"},
+                 {\"name\": \"macOS\", \"url\": \"$CI_API_V4_URL/projects/$CI_PROJECT_ID/jobs/artifacts/$CI_COMMIT_REF_NAME/raw/executables/$EXECUTABLE_BASE_NAME (MacOS)?job=build_binaries\"},
+                 {\"name\": \"Linux\", \"url\": \"$CI_API_V4_URL/projects/$CI_PROJECT_ID/jobs/artifacts/$CI_COMMIT_REF_NAME/raw/executables/$EXECUTABLE_BASE_NAME (Linux)?job=build_binaries\"}
+               ]
+             }
+           }" \
+           --request POST "$CI_API_V4_URL/projects/$CI_PROJECT_ID/releases"
+  only:
+    - tags

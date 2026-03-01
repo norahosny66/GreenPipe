@@ -1,0 +1,141 @@
+variables:
+  TERRAFORM_VERSION: 1.4.6
+  AWS_DEFAULT_REGION: eu-west-1
+
+# ##### #
+# rules #
+# ##### #
+
+# used to run test/validate stages but only in merge request pipelines
+# (detached) note how other rules all assume they are not part of a merge
+# request as the also check for COLOR var not set in merge requests detached
+# pipelines
+.always: &always
+  rules:
+    - if: '$CI_COMMIT_REF_SLUG'
+      when: always
+
+.manual: &manual
+  rules:
+    - if: '$CI_MERGE_REQUEST_IID'
+      when: never
+    - if: '$CI_COMMIT_REF_SLUG'
+      when: manual
+
+.only-color: &only-color
+  rules:
+    - if: '$COLOR'
+      when: always
+
+# used to run non-validate steps (deploys)
+.only-color-manual: &only-color-manual
+  rules:
+    - if: '$COLOR'
+      when: manual
+
+# ######### #
+# executors #
+# ######### #
+
+.executor-terraform: &executor-terraform
+  image:
+    name: hashicorp/terraform:$TERRAFORM_VERSION
+    entrypoint: ['']
+  tags:
+    - docker
+
+# ############## #
+# extends blocks #
+# ############## #
+
+.validate-terraform:
+  stage: validation
+  <<: *executor-terraform
+  script:
+    - terraform init -backend-config="bucket=$STATE_BUCKET"
+    - terraform plan
+
+.validate-color-terraform:
+  stage: validation
+  <<: *executor-terraform
+  script:
+    - terraform init -backend-config="bucket=$STATE_BUCKET"
+    - terraform workspace select $COLOR || terraform workspace new $COLOR
+    - terraform plan
+
+.apply-terraform:
+  <<: *executor-terraform
+  script:
+    - terraform init -backend-config="bucket=$STATE_BUCKET"
+    - terraform apply -auto-approve
+
+.apply-color-terraform:
+  <<: *executor-terraform
+  script:
+    - terraform init -backend-config="bucket=$STATE_BUCKET"
+    - terraform workspace select $COLOR
+    - terraform apply -auto-approve
+
+stages:
+  - validation
+  - release
+
+# ############################ #
+# infrastructure validate/plan #
+# ############################ #
+
+foundation-validate:
+  extends: .validate-terraform
+  <<: *always
+  variables:
+    TF_VAR_domain: $DOMAIN
+  before_script:
+    - cd foundation
+
+application-validate:
+  extends: .validate-color-terraform
+  <<: *only-color
+  variables:
+    TF_VAR_domain: $DOMAIN
+  before_script:
+    - cd application
+
+blue-green-validate:
+  extends: .validate-terraform
+  <<: *only-color
+  variables:
+    TF_VAR_color: $COLOR
+    TF_VAR_domain: $DOMAIN
+  before_script:
+    - cd blue-green
+
+# #################### #
+# infrastructure apply #
+# #################### #
+
+foundation-apply:
+  extends: .apply-terraform
+  <<: *always
+  <<: *manual
+  stage: release
+  before_script:
+    - cd foundation
+
+application-apply:
+  extends: .apply-color-terraform
+  <<: *only-color-manual
+  stage: release
+  variables:
+    TF_VAR_domain: $DOMAIN
+  before_script:
+    - cd application
+
+blue-green-apply:
+  extends: .apply-terraform
+  <<: *only-color-manual
+  stage: release
+  variables:
+    TF_VAR_color: $COLOR
+    TF_VAR_domain: $DOMAIN
+  before_script:
+    - cd blue-green

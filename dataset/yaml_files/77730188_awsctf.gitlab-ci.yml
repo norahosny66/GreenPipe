@@ -1,0 +1,38 @@
+image: golang:latest
+
+stages:
+  - test
+  - build
+
+variables:
+  GOPATH: ${CI_PROJECT_DIR}/.go
+  CGO_ENABLED: "0"
+
+cache:
+  paths:
+    - .go/pkg/mod/
+
+before_script:
+  - mkdir -p .go
+  - go mod download
+
+lint:
+  image: golangci/golangci-lint:latest
+  stage: test
+  script:
+    - golangci-lint run -v
+  allow_failure: true
+
+unit_tests:
+  stage: test
+  script:
+    - go test -v ./...
+
+compile:
+  stage: build
+  script:
+    - go build -o bin/awsctf ./main.go
+  artifacts:
+    paths:
+      - bin/awsctf
+    expire_in: 1 week

@@ -1,0 +1,130 @@
+image: maven:latest
+
+variables:
+  MAVEN_CLI_OPTS: "-s .m2/settings.xml --batch-mode --errors --fail-at-end --show-version"
+  MAVEN_OPTS: "-Dmaven.repo.local=.m2/repository"
+  SONAR_OPTS: "-Dsonar.projectKey=$SONAR_PROJECT_KEY -Dsonar.host.url=$SONAR_HOST_URL -Dsonar.token=$SONAR_TOKEN"
+  VERSION: $(mvn --non-recursive help:evaluate -Dexpression=project.version | grep -v '\[.*')
+include:
+  - template: Security/Secret-Detection.gitlab-ci.yml
+
+cache:
+  paths:
+    - .m2/repository/
+
+stages:
+  - build
+  - test
+  - style
+  - sast
+  - qa
+
+build:
+  stage: build
+  rules:
+    - if: '$CI_MERGE_REQUEST_IID' # Run pipelines on Merge Requests
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - mvn $MAVEN_CLI_OPTS -U -B clean package -DskipTests=true
+  artifacts:
+    paths:
+      - .m2/
+      - target/
+    expire_in: 60 mins
+
+unit_test:
+  stage: test
+  rules:
+    - if: '$CI_MERGE_REQUEST_IID'
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - mvn $MAVEN_CLI_OPTS -U -B test
+    - cat target/site/jacoco/index.html | grep -o 'Total[^%]*%' | sed 's/<.*>/ /; s/Total/COBERTURA/'
+  artifacts:
+    paths:
+      - target/
+    expire_in: 60 mins
+
+checkstyle:
+  stage: style
+  rules:
+    - if: '$CI_MERGE_REQUEST_IID' # Run pipelines on Merge Requests
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - mvn $MAVEN_CLI_OPTS -U -B checkstyle:checkstyle-aggregate
+  artifacts:
+    paths:
+      - target/checkstyle-reports
+
+secret_detection:
+  rules:
+    - if: '$CI_MERGE_REQUEST_IID'
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  stage: sast
+  artifacts:
+    paths:
+      - target/
+    reports:
+      sast: [gl-secret-detection-report.json]
+    expire_in: 60 mins
+
+spotbugs-sast:
+  stage: sast
+  allow_failure: true
+  rules:
+    - if: '$CI_MERGE_REQUEST_IID'
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - mvn $MAVEN_CLI_OPTS -U -B spotbugs:check
+  artifacts:
+    paths:
+      - target/
+    reports:
+      sast: [target/spotbugs-sast.xml]
+    expire_in: 60 mins
+
+dependency_check:
+  stage: sast
+  allow_failure: true
+  rules:
+    - if: '$CI_MERGE_REQUEST_IID'
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - mvn $MAVEN_CLI_OPTS -U -B dependency-check:check
+  artifacts:
+    paths:
+      - target/
+    expire_in: 60 mins
+
+dependency_track:
+  stage: sast
+  allow_failure: true
+  rules:
+    - if: '$CI_MERGE_REQUEST_IID'
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - mvn $MAVEN_CLI_OPTS -U -B cyclonedx:makeAggregateBom
+  artifacts:
+    paths:
+      - target/
+    expire_in: 60 mins
+
+send_dp_track:
+  stage: qa
+  dependencies:
+    - dependency_track
+  rules:
+    - if: '$CI_MERGE_REQUEST_IID'
+  script:
+    - export VERSION=$(mvn --non-recursive help:evaluate -Dexpression=project.version | grep -E '^[0-9]+.[0-9]+.[0-9]+(-[A-Z]+)?$')
+    - echo version-$VERSION
+    - curl --location "$DP_TRACKER_API_URL/api/v1/bom" --header "x-api-key:$DP_TRACKER_KEY" --form "projectName=$DP_TRACKER_PROJECT" --form "autoCreate=true" --form "projectVersion=$VERSION" --form "bom=@\"$CI_PROJECT_DIR/target/bom.xml\""
+  when: manual
+
+sonar_check:
+  stage: qa
+  rules:
+    - if: '$CI_MERGE_REQUEST_IID' # Run pipelines on Merge Requests
+  script:
+    - mvn $MAVEN_CLI_OPTS -U -B sonar:sonar -Dsonar.qualitygate.wait=true $SONAR_OPTS
+  when: manual

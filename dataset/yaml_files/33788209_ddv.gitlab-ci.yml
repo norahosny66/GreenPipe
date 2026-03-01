@@ -1,0 +1,124 @@
+image: node:16.10.0
+
+variables:
+  ARTIFACT_DOWNLOAD_ATTEMPTS: 2 # number of retries for restoring saved artifacts
+  FORCE_COLOR: 1
+  GET_SOURCES_ATTEMPTS: 2
+  GIT_STRATEGY: fetch
+  GIT_SUBMODULE_STRATEGY: recursive
+  RESTORE_CACHE_ATTEMPTS: 2
+
+stages:
+  - prepare
+  - verify
+  - build
+  - publish
+
+install:
+  stage: prepare
+  interruptible: true
+  retry: 1
+  artifacts:
+    name: "deps_$CI_COMMIT_REF_SLUG"
+    paths:
+      - node_modules/
+    when: on_success
+    expire_in: 10d
+  script:
+    - npm config set -- '//registry.npmjs.org/:_authToken' "${NPM_AUTH_TOKEN}"
+    - npm install --no-progress --no-audit --no-fund --verbose
+  only:
+    - merge_requests
+    - master
+
+lint:
+  stage: verify
+  interruptible: true
+  retry: 1
+  dependencies:
+    - install
+  script:
+    - npm run lint
+  only:
+    - merge_requests
+    - master
+
+test:
+  stage: verify
+  interruptible: true
+  retry: 1
+  dependencies:
+    - install
+  script:
+    - npm run test
+  only:
+    - merge_requests
+    - master
+
+buildlib:
+  stage: build
+  interruptible: true
+  retry: 1
+  dependencies:
+    - install
+    - lint
+    - test
+  script:
+    - npm run lib:build
+  cache:
+    key: build-cache
+    policy: push
+    paths:
+      - generated/libdist
+  only:
+    - merge_requests
+    - master
+
+pages:
+  stage: publish
+  dependencies:
+    - install
+  cache:
+    key:
+      files:
+        - package-lock.json
+      prefix: npm
+    paths:
+      - node_modules/
+  script:
+    - npm run docs:build
+    - mv generated/staticdocs public
+  artifacts:
+    name: public
+    paths:
+      - public
+  rules:
+    #- if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - when: manual
+
+npm:
+  stage: publish
+  interruptible: false
+  retry: 1
+  dependencies:
+    - install
+    - lint
+    - test
+    - buildlib
+  cache:
+    key: build-cache
+    policy: pull
+    paths:
+      - generated/libdist
+  script:
+    - npm config set -- '//registry.npmjs.org/:_authToken' "${NPM_AUTH_TOKEN}"
+    - cd generated/libdist
+    - npm publish --verbose --access public
+    #- npm publish --verbose --dry-run --access public
+  resource_group: "deployment_$CI_COMMIT_REF_SLUG"
+  rules:
+    #- if: "$CI_DEPLOY_FREEZE != null"
+    #  when: never
+    #- if: '$CI_COMMIT_REF_NAME != "master"'
+    #  when: never
+    - when: manual

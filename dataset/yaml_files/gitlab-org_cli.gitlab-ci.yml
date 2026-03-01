@@ -1,0 +1,560 @@
+variables:
+  GO_VERSION: "1.25.4"
+  GITLAB_ADVANCED_SAST_ENABLED: "true"
+
+.code-patterns: &code-patterns
+  - ".gitlab/**/*"
+  - "**/*.go"
+  - "scripts/**/*"
+  - "test/**/*"
+  - ".gitignore"
+  - ".gitlab-ci.yml"
+  - ".golangci.yml"
+  - "Dangerfile"
+  - "Makefile"
+  - "go.mod"
+  - "go.sum"
+
+.sign_windows_base:
+  image: ${CI_REGISTRY}/gitlab-com/gl-infra/common-ci-tasks-images/code-signer:1.3.0
+  extends: .google-oidc:auth
+  rules:
+    - if: $CI_COMMIT_TAG && $CI_SERVER_HOST == "gitlab.com" && ($CI_PROJECT_PATH == "gitlab-org/cli" || $CI_PROJECT_PATH == "gitlab-org/security/cli")
+  stage: release
+  artifacts:
+    expire_in: 7 days
+  variables:
+    GCLOUD_PROJECT: gitlab-ci-runners-signing
+    SERVICE_ACCOUNT: gitlab-cli-signer@gitlab-ci-runners-signing.iam.gserviceaccount.com
+    WI_POOL_PROVIDER: //iam.googleapis.com/projects/8522242139/locations/global/workloadIdentityPools/gitlab-pool-oidc-$CI_PROJECT_ID/providers/gitlab-jwt-$CI_PROJECT_ID
+
+.use_signed_if_available: &use_signed_if_available
+  - |
+    if [ -d "signed/" ]; then
+      echo "Using signed binaries"
+      rm -rf bin/
+      mv signed bin
+      ls -al bin
+    else
+      echo "Using unsigned binaries"
+    fi
+
+# run the pipeline only on MRs, tags, and default branch
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+default:
+  image: ${GITLAB_DEPENDENCY_PROXY}golang:${GO_VERSION}
+  tags:
+    # NOTE: largest linux-based hosted runner available in Free tier.
+    # see https://docs.gitlab.com/ci/runners/hosted_runners/linux/#machine-types-available-for-linux---x86-64
+    - "saas-linux-medium-amd64"
+
+stages:
+  - .pre
+  - documentation
+  - test
+  - build
+  - release
+
+include:
+  # remove the `.latest` from the following templates after 16.0 GitLab release
+  # the `.latest` indicates the "nightly" version of the job definition
+  # when we remove the `.latest`, we'll be using the stable job definition
+  # https://gitlab.com/gitlab-org/cli/-/merge_requests/1100#note_1186302003
+  - template: Jobs/SAST.latest.gitlab-ci.yml
+  - template: Jobs/Dependency-Scanning.latest.gitlab-ci.yml
+  - template: Jobs/Secret-Detection.latest.gitlab-ci.yml
+  - component: ${CI_SERVER_FQDN}/gitlab-org/components/danger-review/danger-review@2.1.0
+  - component: ${CI_SERVER_FQDN}/components/code-intelligence/golang-code-intel@v0.0.3
+    inputs:
+      golang_version: ${GO_VERSION}
+  - project: "gitlab-com/gl-security/security-operations/infrastructure-security-public/oidc-modules"
+    ref: 3.4.0
+    file: templates/gcp_auth.yaml
+
+# From: https://docs.gitlab.com/ci/caching/#cache-go-dependencies
+# Base template for Go caching - extended by jobs that need Go dependencies
+.go-cache:
+  variables:
+    GOPATH: $CI_PROJECT_DIR/.go
+    GOCACHE: $CI_PROJECT_DIR/.gocache
+    GOLANGCI_LINT_CACHE: $CI_PROJECT_DIR/.golangci-lint-cache
+  cache:
+    paths:
+      - $CI_PROJECT_DIR/.go/pkg/mod/
+      - $CI_PROJECT_DIR/.gocache/
+      - $CI_PROJECT_DIR/.golangci-lint-cache/
+    key:
+      files:
+        - go.sum
+    policy: pull-push
+
+prepare_go_cache:
+  extends: .go-cache
+  stage: .pre
+  cache:
+    key:
+      prefix: prepare
+  script:
+    - go mod download
+
+.documentation:
+  stage: documentation
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+.test:
+  stage: test
+  rules:
+    - changes: *code-patterns
+      when: always
+
+check_docs_update:
+  extends: .documentation
+  script:
+    - git fetch origin $CI_MERGE_REQUEST_TARGET_BRANCH_NAME && git checkout $CI_MERGE_REQUEST_TARGET_BRANCH_NAME && git checkout $CI_COMMIT_SHA
+    - make gen-docs
+    - |-
+      git status
+      if [[ $(git add -A --dry-run) ]]; then
+        echo '✖ ERROR: Documentation changes detected!';
+        git diff --color --ws-error-highlight=all
+        echo '✖ These changes require a documentation update. To regenerate the docs, read https://gitlab.com/gitlab-org/cli/-/tree/main/docs#generating-the-docs.';
+        exit 1;
+      else
+        echo '✔ No documentation updates detected.';
+        exit 0;
+      fi
+
+check_docs_markdown:
+  image: registry.gitlab.com/gitlab-org/technical-writing/docs-gitlab-com/lint-markdown:alpine-3.22-vale-3.13.0-markdownlint2-0.19.0-lychee-0.21.0
+  extends: .documentation
+  script:
+    # Lint prose
+    - vale --minAlertLevel error docs
+    # Lint Markdown
+    - markdownlint-cli2 'docs/**/*.md' *.md
+    # Check links
+    - lychee --offline --include-fragments docs/**/*.md *.md
+
+docs hugo_build:
+  image: registry.gitlab.com/gitlab-org/technical-writing/docs-gitlab-com/docs-gitlab-com-builder:hugo-0.150.1
+  extends: .documentation
+  needs: []
+  dependencies: []
+  variables:
+    DOCS_BRANCH: "main"
+  before_script:
+    # Check if this a release branch, which would be the case for a backport.
+    # If this is a backport MR, we need to checkout the appropriate version
+    # of the Docs website.
+    - |
+      if [[ $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ [0-9]+-[0-9]+-stable ]]; then
+        BRANCH_NAME=$CI_MERGE_REQUEST_TARGET_BRANCH_NAME
+        echo "Detected merge request to stable branch: $BRANCH_NAME"
+      # Check if we're directly on a stable branch (direct push/commit)
+      elif [[ $CI_COMMIT_BRANCH =~ [0-9]+-[0-9]+-stable ]]; then
+        BRANCH_NAME=$CI_COMMIT_BRANCH
+        echo "Detected direct commit to stable branch: $BRANCH_NAME"
+      fi
+
+      # Extract version info if we found a stable branch
+      if [[ -n $BRANCH_NAME ]]; then
+        MAJOR=$(echo $BRANCH_NAME | cut -d '-' -f 1)
+        MINOR=$(echo $BRANCH_NAME | cut -d '-' -f 2)
+        # Convert GitLab style (17-9-stable-ee) to Docs style (17.9)
+        DOCS_BRANCH_CANDIDATE="$MAJOR.$MINOR"
+
+        # Check if the branch exists in the Docs website repo, fallback to main if not
+        if git ls-remote --heads --exit-code https://gitlab.com/gitlab-org/technical-writing/docs-gitlab-com.git "refs/heads/$DOCS_BRANCH_CANDIDATE" >/dev/null 2>&1; then
+          DOCS_BRANCH="$DOCS_BRANCH_CANDIDATE"
+          echo "Using docs-gitlab-com branch $DOCS_BRANCH for release branch"
+        else
+          DOCS_BRANCH="main"
+          echo "Branch $DOCS_BRANCH_CANDIDATE does not exist, falling back to main"
+        fi
+      fi
+    # Clone the Docs website project
+    - git clone --depth 1 --filter=tree:0 --branch $DOCS_BRANCH https://gitlab.com/gitlab-org/technical-writing/docs-gitlab-com.git
+    - cd docs-gitlab-com
+    - make add-latest-icons
+  script:
+    # Remove unwanted files from CLI docs/ to avoid conflicts with docs/source/
+    # See https://gitlab.com/gitlab-org/technical-writing/docs-gitlab-com/-/merge_requests/1554#note_2901887344
+    - rm -f ../docs/index.rst ../docs/*.md
+    # Test that Hugo will build
+    - hugo --gc --printPathWarnings --panicOnWarning  --environment test
+    # Test for invalid index pages
+    # See https://gitlab.com/gitlab-org/technical-writing/docs-gitlab-com/-/blob/main/scripts/check-index-filenames.sh
+    - make check-index-pages SEARCH_DIR="../docs/source"
+    #- make check-index-pages SEARCH_DIR="../doc-locale/source" # Enable when translation is added
+
+check_go_generated_code:
+  extends:
+    - .go-cache
+    - .test
+  needs:
+    - job: prepare_go_cache
+      optional: true
+  cache:
+    key:
+      prefix: check-generated
+  script:
+    # Workaround config.yaml.lock file permissions
+    - chmod 600 internal/config/config.yaml.lock
+    - make generate
+    - |
+      echo "Checking git status"
+      [ -z "$(git status --short)" ] || {
+        echo "Error: Files should have been generated:";
+        git status --short; echo "Diff:";
+        git --no-pager diff HEAD;
+        echo "Run \"make generate\" and try again";
+        exit 1;
+      }
+
+lint_commit:
+  stage: test
+  needs: []
+  image: ${GITLAB_DEPENDENCY_PROXY}node:24-slim
+  script:
+    - apt-get update && apt-get install -y git
+    - git fetch origin $CI_MERGE_REQUEST_TARGET_BRANCH_NAME $CI_COMMIT_SHA
+    - cd scripts/commit-lint && npm ci
+    - ./lint.sh
+  rules:
+    - if: '$CI_MERGE_REQUEST_IID && $CI_PROJECT_VISIBILITY == "public"' # lint.js script makes an API call without authentication
+      when: always
+
+lint:
+  extends:
+    - .go-cache
+    - .test
+  needs:
+    - job: prepare_go_cache
+      optional: true
+  image: ${GITLAB_DEPENDENCY_PROXY}golangci/golangci-lint:v2.10.1-alpine
+  cache:
+    key:
+      prefix: lint
+  script:
+    # Write the code coverage report to gl-code-quality-report.json
+    # and print linting issues to stdout in the format: path/to/file:line description
+    # add `--issues-exit-code 0` to ignore linting issues
+    - golangci-lint run --output.text.path=stdout --output.text.colors=false --output.text.print-issued-lines=false --output.code-climate.path=gl-code-quality-report.json
+  artifacts:
+    reports:
+      codequality: gl-code-quality-report.json
+    paths:
+      - gl-code-quality-report.json
+    expire_in: 7 days
+
+tests:unit:
+  extends:
+    - .go-cache
+    - .test
+  needs:
+    - job: prepare_go_cache
+      optional: true
+  # We currently only test on the latest version of Go which we also build against.
+  # If we need to introduce testing for future versions of compatibility reasons
+  # uncomment the below lines and adjust the `GO_VERSION` to included versions to test.
+  # parallel:
+  # matrix:
+  # - GO_VERSION: ["1.22.3"]
+  variables:
+    # NOTE: required for race detector
+    CGO_ENABLED: "1"
+  cache:
+    key:
+      prefix: test-unit
+  script:
+    - make test-race
+  after_script:
+    - echo -e "\e[0Ksection_start:`date +%s`:coverage[collapsed=true]\r\e[0KRunning coverage report"
+    - make coverage
+    - echo -e "\e[0Ksection_end:`date +%s`:coverage\r\e[0K"
+  coverage: /^total:\t+\(statements\)\t+\d+\.\d+%$/
+  artifacts:
+    when: always
+    reports:
+      junit: coverage.xml
+    access: "developer"
+    expire_in: 7 days
+
+tests:integration:
+  extends:
+    - .test
+  needs: []
+  # We currently only test on the latest version of Go which we also build against.
+  # If we need to introduce testing for future versions of compatibility reasons
+  # uncomment the below lines and adjust the `GO_VERSION` to included versions to test.
+  # parallel:
+  # matrix:
+  # - GO_VERSION: ["1.22.3"]
+  variables:
+    # NOTE: required for race detector
+    CGO_ENABLED: "1"
+  script:
+    # `goreleaser` also uses GITLAB_TOKEN and so we need to distinguish between
+    # the GITLAB_TOKEN_TEST with less privilege used for testing and the GITLAB_TOKEN_RELEASE token
+    # GITLAB_TEST_HOST is the GitLab instance used for the integration tests
+    - GITLAB_TOKEN_TEST=$GITLAB_TOKEN_TEST GITLAB_TEST_HOST=$GITLAB_TEST_HOST make integration-test-race
+  after_script:
+    - echo -e "\e[0Ksection_start:`date +%s`:coverage[collapsed=true]\r\e[0KRunning coverage report"
+    - make coverage
+    - echo -e "\e[0Ksection_end:`date +%s`:coverage\r\e[0K"
+
+.release:
+  extends: .sign_windows_base
+  tags:
+    # NOTE: we really benefit from the capacities of this 2xlarge runner.
+    # we only want to build from the canonical project so we don't really
+    # need to bother about this being compatible with forks.
+    - "saas-linux-2xlarge-amd64"
+  stage: release
+  image: ${GITLAB_DEPENDENCY_PROXY}docker:stable
+  services:
+    - docker:28-dind
+  variables:
+    # Disable shallow cloning so that goreleaser can diff between tags to
+    # generate a changelog.
+    GIT_DEPTH: 0
+  needs: [sign_windows_installer]
+  dependencies: [sign_windows_installer]
+  before_script:
+    - !reference [.google-oidc:auth, before_script]
+    - *use_signed_if_available
+    # The OIDC module creates secrets in /var/run/secrets/gitlab, but this
+    # mount is only available on the job container, not the docker:dind
+    # service. Copy these files into the project dir to ensure
+    # all containers can access it.
+    - cp -r /var/run/secrets/gitlab .gitlab-secrets
+  after_script:
+    - !reference [.google-oidc:auth, after_script]
+    - rm -rf .gitlab-secrets
+
+build_test:
+  extends: .release
+  stage: build
+  rules:
+    - if: $CI_MERGE_REQUEST_EVENT_TYPE == "merge_train"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+      when: never
+    - changes:
+        - .goreleaser.yml
+        - .gitlab-ci.yml
+  script: |
+    docker run --rm --privileged \
+      -e CI=$CI \
+      -e CI_COMMIT_TAG=$CI_COMMIT_TAG \
+      -e APPSTORE_CONNECT_API_KEY_FILE=$APPSTORE_CONNECT_API_KEY_FILE \
+      -e GCLOUD_PROJECT=$GCLOUD_PROJECT \
+      -e GO_VERSION="$GO_VERSION" \
+      -e GOOGLE_APPLICATION_CREDENTIALS=$GOOGLE_APPLICATION_CREDENTIALS \
+      -e HOST_PWD=$PWD \
+      -v $PWD:/go/src/gitlab.com/gitlab-org/cli \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -w /go/src/gitlab.com/gitlab-org/cli \
+      goreleaser/goreleaser:nightly release --skip=sign --snapshot
+  artifacts:
+    name: goreleaser-artifacts
+    paths:
+      - dist/
+    expire_in: 7 days
+  needs:
+    - job: windows_installer
+      optional: false
+    - job: sign_windows_installer
+      optional: true
+
+release:
+  extends: .release
+  rules:
+    - if: $CI_COMMIT_TAG
+  script: |
+    docker run --rm --privileged \
+      -e CI=$CI \
+      -e CI_COMMIT_TAG=$CI_COMMIT_TAG \
+      -e APPSTORE_CONNECT_API_KEY_FILE=$APPSTORE_CONNECT_API_KEY_FILE \
+      -e GCLOUD_PROJECT=$GCLOUD_PROJECT \
+      -e GO_VERSION="$GO_VERSION" \
+      -e GITLAB_TOKEN=$GITLAB_TOKEN_RELEASE \
+      -e GOOGLE_APPLICATION_CREDENTIALS=$GOOGLE_APPLICATION_CREDENTIALS \
+      -e HOST_PWD=$PWD \
+      -e SLACK_WEBHOOK=$SLACK_WEBHOOK \
+      -e SLACK_CHANNEL=$SLACK_CHANNEL \
+      -v $PWD:/go/src/gitlab.com/gitlab-org/cli \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -w /go/src/gitlab.com/gitlab-org/cli \
+      --entrypoint "" \
+      goreleaser/goreleaser:nightly \
+      bash -c "
+        docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+        docker login -u $DOCKER_IO_USER -p $DOCKER_IO_PASSWORD
+        goreleaser release
+      "
+
+homebrew-release:
+  image: ${GITLAB_DEPENDENCY_PROXY}homebrew/brew:4.6.20
+  stage: release
+  needs: [release]
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - touch ~/.gitconfig
+    - git config --global user.email "$GITHUB_EMAIL"
+    - git config --global user.name "$GITHUB_NAME"
+    - brew bump-formula-pr glab --no-browse --tag="$CI_COMMIT_TAG" --revision="$CI_COMMIT_SHA"
+
+windows_installer:
+  stage: build
+  image:
+    name: ${GITLAB_DEPENDENCY_PROXY}amake/innosetup:latest
+    entrypoint: [""]
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_MERGE_REQUEST_EVENT_TYPE == "merge_train"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - changes:
+        - .goreleaser.yml
+        - .gitlab-ci.yml
+  before_script:
+    - *use_signed_if_available
+  script:
+    - mv scripts/setup_windows.iss .
+    - iscc "setup_windows.iss" -DVersion=${CI_COMMIT_TAG//v}
+  artifacts:
+    paths:
+      - "bin/*"
+    expire_in: 7 days
+  needs:
+    - job: build_windows
+      optional: false
+    - job: sign_windows_glab
+      optional: true
+
+build_windows:
+  extends: .go-cache
+  stage: build
+  needs:
+    - job: prepare_go_cache
+      optional: true
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_MERGE_REQUEST_EVENT_TYPE == "merge_train"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - changes:
+        - .goreleaser.yml
+        - .gitlab-ci.yml
+  cache:
+    key:
+      prefix: build-windows
+  script:
+    - GOOS=windows GOARCH=amd64 make build
+    - mv bin/glab bin/glab.exe
+  artifacts:
+    paths:
+      - "bin/glab.exe"
+    expire_in: 7 days
+
+sign_windows_glab:
+  extends: .sign_windows_base
+  stage: build
+  needs:
+    - build_windows
+  script:
+    - sign-windows-binaries --output-dir signed bin/glab.exe
+  artifacts:
+    paths:
+      - "signed/glab.exe"
+
+sign_windows_installer:
+  extends: .sign_windows_base
+  stage: build
+  needs:
+    - windows_installer
+  script:
+    - sign-windows-binaries --output-dir signed bin/glab_*Windows_x86_64_installer.exe
+  artifacts:
+    paths:
+      - "signed/glab_*Windows_x86_64_installer.exe"
+
+.snapcraft_base:
+  image:
+    name: ghcr.io/canonical/snapcraft:8_core24
+    entrypoint: [""]
+  script:
+    - apt-get update
+    - apt-get install -y git
+    # Set version dynamically in snapcraft.yaml
+    - |
+      if git describe --exact-match --tags HEAD >/dev/null 2>&1; then
+        VERSION=$(git describe --tags --abbrev=0 | sed 's/^v//')
+      else
+        VERSION=$(git describe --tags --always | sed 's/^v//')
+      fi
+      sed -i "s/^version: git$/version: \"$VERSION\"/" snap/snapcraft.yaml
+    - snapcraft pack --destructive-mode --verbose
+  artifacts:
+    paths:
+      - "*.snap"
+    expire_in: 7 days
+
+snapcraft_build_stable:
+  extends: .snapcraft_base
+  stage: build
+  rules:
+    - if: $CI_COMMIT_TAG
+
+snapcraft_build_edge:
+  extends: .snapcraft_base
+  stage: build
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE != "merge_request_event"
+    - if: $CI_MERGE_REQUEST_EVENT_TYPE == "merge_train"
+    - changes:
+        - snap/snapcraft.yaml
+        - .gitlab-ci.yml
+
+snapcraft_release_stable:
+  stage: release
+  image:
+    name: ghcr.io/canonical/snapcraft:8_core24
+    entrypoint: [""]
+  needs:
+    - snapcraft_build_stable
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - export SNAPCRAFT_STORE_CREDENTIALS=$(cat $SNAPCRAFT_CREDENTIALS_FILE)
+    - snapcraft whoami
+    - snapcraft upload *.snap --release=latest/stable
+    - snapcraft logout
+
+snapcraft_release_edge:
+  stage: release
+  image:
+    name: ghcr.io/canonical/snapcraft:8_core24
+    entrypoint: [""]
+  needs:
+    - snapcraft_build_edge
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - export SNAPCRAFT_STORE_CREDENTIALS=$(cat $SNAPCRAFT_CREDENTIALS_FILE)
+    - snapcraft whoami
+    - snapcraft upload *.snap --release=latest/edge
+    - snapcraft logout
+  # NOTE: this is allowed to fail because of manual snap package reviews.
+  # See https://gitlab.com/gitlab-org/cli/-/work_items/8116.
+  # It should be removed once we no longer require manual reviews.
+  allow_failure: true
+
+secret_detection:
+  dependencies: [] # Don't download artifacts, especially `./public/`

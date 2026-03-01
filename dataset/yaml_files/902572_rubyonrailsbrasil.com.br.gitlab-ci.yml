@@ -1,0 +1,51 @@
+stages:
+  - test
+  - deploy
+  - performance
+
+.ruby: &ruby
+  image: ruby:2.6
+  variables:
+    LANG: "C.UTF-8"
+  before_script:
+      - which ruby
+      - bundle install --deployment --jobs $(nproc) --path vendor
+  cache:
+    paths:
+      - vendor/
+
+test:
+  <<: *ruby
+  stage: 'test'
+  variables:
+    PREVIEW: "true"
+  script:
+    - bundle exec rake build
+  except:
+    - master
+  artifacts:
+    paths:
+      - public
+    expire_in: 2w
+
+pages:
+  <<: *ruby
+  stage: deploy
+  script:
+    - bundle exec rake build
+  artifacts:
+    paths:
+      - public
+  only:
+    - master
+
+performance:
+  variables:
+    URL: https://rubyonrailsbrasil.com.br/
+    SITESPEED_VERSION: 17.2.0
+
+include:
+  - template: Dependency-Scanning.gitlab-ci.yml
+  - template: SAST.gitlab-ci.yml
+  - template: Code-Quality.gitlab-ci.yml
+  - template: Verify/Browser-Performance.gitlab-ci.yml

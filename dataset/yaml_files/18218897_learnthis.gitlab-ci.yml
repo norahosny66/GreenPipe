@@ -1,0 +1,75 @@
+variables:
+  SONAR_USER_HOME: '${CI_PROJECT_DIR}/.sonar' # Defines the location of the analysis task cache
+  GIT_DEPTH: '0' # Tells git to fetch all the branches of the project, required by the analysis task
+
+sonarcloud-check:
+  image:
+    name: sonarsource/sonar-scanner-cli:latest
+    entrypoint: ['']
+  cache:
+    key: '${CI_JOB_NAME}'
+    paths:
+      - .sonar/cache
+  before_script:
+    - npm i lerna
+    - npm run initialize
+    - cd packages/backend
+    - cp .env.example .env
+    - npm run test
+    - npm run test:cov
+    - cd ..
+    - cd ..
+  script:
+    - sonar-scanner
+  only:
+    - merge_requests
+    - master
+    - develop
+
+image: node:14.15.0
+
+stages:
+  - test
+
+backend:
+  stage: test
+  before_script:
+    - npm i lerna
+    - npm run initialize
+    - cd packages/backend
+    - npm install
+    - npm link learnthis-utils
+    - cp .env.example .env
+  script:
+    - npm run test:e2e
+    - npm run test
+    - npm run test:cov
+  coverage: '/Lines \W+: (\d+\.\d+)%.*/'
+  artifacts:
+    when: always
+    reports:
+      junit: ./packages/backend/coverage/junit.xml
+
+  cache:
+    key: backend
+    paths:
+      - backend/node_modules/
+
+pages:
+  before_script:
+    - npm i lerna
+    - npm run initialize
+    - cd packages/backend
+    - npm install
+    - npm link learnthis-utils
+  script:
+    - npm run doc
+    - cp -r documentation/ ../../public/
+  artifacts:
+    paths:
+      - public
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master"'
+
+include:
+  - template: Dependency-Scanning.gitlab-ci.yml

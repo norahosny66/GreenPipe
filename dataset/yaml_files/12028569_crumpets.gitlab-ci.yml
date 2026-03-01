@@ -1,0 +1,48 @@
+stages:
+  - build
+  - doc
+
+
+variables:
+  PYVERS: cp36|cp37|cp38|cp39
+
+
+.image: &image
+  image: quay.io/pypa/manylinux2014_x86_64
+
+
+.build:
+  <<: *image
+  stage: build
+  script:
+  - ./build_wheels.sh
+  artifacts:
+    paths:
+    - dist/*.whl
+
+
+devel:
+  extends: .build
+  artifacts:
+    expire_in: 8 hours
+  except:
+    - tags
+
+
+release:
+  extends: .build
+  artifacts:
+    expire_in: 1000 years
+  only:
+    - tags
+
+
+doc:
+  <<: *image
+  stage: doc
+  script:
+    - ./build_doc.sh
+  artifacts:
+    paths:
+    - doc/out
+    expire_in: 8 hours

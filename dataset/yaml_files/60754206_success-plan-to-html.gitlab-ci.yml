@@ -1,0 +1,65 @@
+stages:
+  - build
+  - test
+  - release
+
+build:
+  image: docker:20.10.16
+  stage: build
+  services:
+    - docker:20.10.16-dind
+  variables:
+    IMAGE_TAG: $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker build -t $IMAGE_TAG ./templates/success-plan-to-html
+    - docker push $IMAGE_TAG
+
+build-for-tag:
+  extends: build
+  variables:
+    IMAGE_TAG: $CI_REGISTRY_IMAGE:$CI_COMMIT_TAG
+  rules:
+    - if: $CI_COMMIT_TAG
+ 
+trigger-test-job:
+  stage: test
+  variables:
+    CP_TEST_VERSION: $CI_COMMIT_REF_NAME
+  trigger:
+    include:
+      - local: templates/success-plan-to-html/test.gitlab-ci.yml
+
+create-release-notes:
+  stage: build
+  image: alpine:latest
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $TEST_RELEASE_NOTES
+  before_script:
+    - apk add curl jq
+  script:
+    - mkdir -p build/release-notes
+    - echo "# Summary" >> build/release-notes/release-notes.md
+    - echo "" >> build/release-notes/release-notes.md
+    - echo "$CI_COMMIT_TAG_MESSAGE" >> build/release-notes/release-notes.md
+    - |+
+        curl -H "JOB-TOKEN: $CI_JOB_TOKEN" "$CI_API_V4_URL/projects/$CI_PROJECT_ID/repository/changelog?version=$CI_COMMIT_TAG&to=$CI_COMMIT_TAG" > build/release-notes/changelog-api-response.json
+        cat build/release-notes/changelog-api-response.json | jq -r .notes > build/release-notes/changelog.md
+        echo "" >> build/release-notes/release-notes.md
+        echo "# Changelog" >> build/release-notes/release-notes.md
+        echo "" >> build/release-notes/release-notes.md
+        cat build/release-notes/changelog.md >> build/release-notes/release-notes.md
+  artifacts:
+    paths:
+      - build/release-notes/
+
+create-release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  script: echo "Creating release $CI_COMMIT_TAG"
+  rules:
+    - if: $CI_COMMIT_TAG
+  release:
+    tag_name: $CI_COMMIT_TAG
+    description: build/release-notes/release-notes.md

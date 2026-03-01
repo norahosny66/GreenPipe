@@ -1,0 +1,254 @@
+stages:
+  - build
+  - scan
+  - package
+  - release
+  - deploy
+
+# this pipeline is split, building runs on gitlab.com. Deployment on gitlabext.wsl.ch
+# there therefore the sleep in the deploy stage
+
+variables:
+  ARTIFACT_COMPRESSION_LEVEL: "fast"
+  CACHE_COMPRESSION_LEVEL: "fast"
+
+workflow:
+  rules:
+    # Trigger from web UI
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+      when: always
+    # Trigger in each push
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+      when: always
+
+set-vars:
+  stage: .pre
+  image: docker.io/alpine:3.15
+  before_script:
+    - >
+      apk add jq yq --no-cache
+      --repository=http://dl-cdn.alpinelinux.org/alpine/edge/community
+  script:
+    - cat .env >> build_env
+    - source build_env
+    - "echo BACKEND_IMAGE=${INTERNAL_REG}/monorepo/backend:\
+      ${APP_VERSION}-${CI_COMMIT_REF_NAME} >> build_env"
+    - "echo FRONTEND_IMAGE=${INTERNAL_REG}/monorepo/frontend:\
+      ${APP_VERSION}-${CI_COMMIT_REF_NAME} >> build_env"
+    - echo "Uploading dotenv file:"
+    - cat build_env
+  artifacts:
+    reports:
+      dotenv: build_env
+
+.build:
+  stage: build
+  # Only run on public gitlab instance
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "main" && $CI_SERVER_HOST == "gitlab.com"'
+      when: always
+    - when: never
+  image:
+    name: gcr.io/kaniko-project/executor:v1.8.1-debug
+    entrypoint: [""]
+  before_script:
+    - mkdir -p /kaniko/.docker
+    - echo "going to create kaniko config.json for auth for ${INTERNAL_REG} -> '${CI_REGISTRY_USER}' and https://index.docker.io/v1/ -> '${DOCKER_USERNAME}'"
+    - >
+      echo "{\"auths\":{
+      \"${INTERNAL_REG}\":{
+        \"auth\":\"$(printf "%s:%s" "${CI_REGISTRY_USER}" "${CI_REGISTRY_PASSWORD}" | base64 | tr -d '\n')\"
+        },
+        \"https://index.docker.io/v1/\":{
+          \"auth\":\"$(printf "%s:%s" "${DOCKER_USERNAME}" "${DOCKER_TOKEN}" | base64 | tr -d '\n')\"
+        }
+      }}" > /kaniko/.docker/config.json
+    # - cat /kaniko/.docker/config.json
+  script:
+    - >
+      /kaniko/executor
+      --force
+      --context "${CONTEXT_DIR}"
+      --dockerfile "${CONTEXT_DIR}/Dockerfile"
+      --target "${BUILD_TARGET}"
+      --cache=true
+      --destination "${IMAGE_NAME}-unverified"
+      --build-arg MAINTAINER="${MAINTAINER}"
+      --build-arg EXTERNAL_REG="${EXTERNAL_REG}"
+      --build-arg INTERNAL_REG="${INTERNAL_REG}"
+      --build-arg PYTHON_IMG_TAG="${PYTHON_IMG_TAG}"
+      --build-arg APP_VERSION="${APP_VERSION}"
+      --build-arg NGINX_IMG_TAG="${NGINX_IMG_TAG}"
+      --build-arg APP_API_URL="${APP_API_URL}"
+      --build-arg APP_AUTH0_CLIENT_ID="${APP_AUTH0_CLIENT_ID}"
+      --build-arg APP_AUTH0_DOMAIN="${APP_AUTH0_DOMAIN}"
+      --build-arg APP_AUTH0_API_AUDIENCE="${APP_AUTH0_API_AUDIENCE}"
+      --build-arg APP_MODEL_S3_URL="${APP_MODEL_S3_URL}"
+      --build-arg APP_INSTRUCTIONS_URL="${APP_INSTRUCTIONS_URL}"
+
+backend-build:
+  extends:
+    - .build
+  needs:
+    - set-vars
+  variables:
+    IMAGE_NAME: ${BACKEND_IMAGE}
+    CONTEXT_DIR: "${CI_PROJECT_DIR}"
+    BUILD_TARGET: "prod-docker"
+
+frontend-build:
+  extends:
+    - .build
+  needs:
+    - set-vars
+  variables:
+    IMAGE_NAME: ${FRONTEND_IMAGE}
+    CONTEXT_DIR: "${CI_PROJECT_DIR}/frontend"
+    BUILD_TARGET: "prod"
+
+.scan:
+  stage: scan
+  # Only run on public gitlab instance
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "main" && $CI_SERVER_HOST == "gitlab.com"'
+      when: always
+    - when: never
+  image:
+    name: docker.io/aquasec/trivy:0.23.0
+    entrypoint: [""]
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - trivy --version
+    - time trivy image --clear-cache
+    - time trivy --cache-dir .trivycache/ image --download-db-only --no-progress
+    # Create report artifact
+    - >
+      time trivy --cache-dir .trivycache/ image --exit-code 0 --ignore-unfixed
+      --no-progress --format template --template "@/contrib/gitlab.tpl"
+      --output "$CI_PROJECT_DIR/$SHORT_NAME-imgscan.json"
+      "${IMAGE_NAME}-unverified"
+    # Print full report
+    - >
+      time trivy --cache-dir .trivycache/ image --exit-code 0 --ignore-unfixed
+      --no-progress "${IMAGE_NAME}"-unverified
+    # Fail on critical vulnerabilities
+    - >
+      time trivy --cache-dir .trivycache/ image --exit-code 1 --ignore-unfixed
+      --severity CRITICAL --no-progress "${IMAGE_NAME}"-unverified
+  cache:
+    key: trivy-cache
+    paths:
+      - .trivycache/
+    policy: pull-push
+  artifacts:
+    when: always
+    reports:
+      container_scanning: $SHORT_NAME-imgscan.json
+
+backend-scan:
+  extends:
+    - .scan
+  needs:
+    - set-vars
+    - backend-build
+  variables:
+    IMAGE_NAME: ${BACKEND_IMAGE}
+    SHORT_NAME: "backend"
+
+frontend-scan:
+  extends:
+    - .scan
+  needs:
+    - set-vars
+    - frontend-build
+  variables:
+    IMAGE_NAME: ${FRONTEND_IMAGE}
+    SHORT_NAME: "frontend"
+
+.retag:
+  stage: package
+  # Only run on public gitlab instance
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "main" && $CI_SERVER_HOST == "gitlab.com"'
+      when: always
+    - when: never
+  image: docker.io/regclient/regctl:v0.3-alpine
+  variables:
+    GIT_STRATEGY: none
+  before_script:
+    - export REG_HOST=${INTERNAL_REG%/*}
+    - >
+      echo "{\"hosts\":{\"${REG_HOST}\":{\"tls\":\"enabled\",\"hostname\":
+      \"${REG_HOST}\",\"user\":\"${CI_REGISTRY_USER}\",\"pass\":
+      \"${CI_REGISTRY_PASSWORD}\"}}}" >> /home/appuser/.regctl/config.json
+  script:
+    - >
+      regctl --verbosity debug image copy
+      "${IMAGE_NAME}-unverified" "${IMAGE_NAME}"
+    - regctl --verbosity debug tag delete "${IMAGE_NAME}-unverified"
+
+backend-retag:
+  extends:
+    - .retag
+  needs:
+    - set-vars
+    - backend-scan
+  variables:
+    IMAGE_NAME: ${BACKEND_IMAGE}
+
+frontend-retag:
+  extends:
+    - .retag
+  needs:
+    - set-vars
+    - frontend-scan
+  variables:
+    IMAGE_NAME: ${FRONTEND_IMAGE}
+
+release:
+  stage: release
+  # Only run on public gitlab instance & for tags
+  rules:
+    - if: '$CI_SERVER_HOST == "gitlab.com" && $CI_COMMIT_TAG'
+      when: always
+    - when: never
+  image: registry.gitlab.com/gitlab-org/release-cli:v0.13.0
+  needs:
+    - backend-retag
+    - frontend-retag
+  script:
+    - echo "Running the release job."
+  release:
+    name: "Release $CI_COMMIT_TAG"
+    description: "Release created using the release-cli."
+    tag_name: $CI_COMMIT_TAG
+
+remote-docker:
+  stage: deploy
+  # Only run on internal WSL gitlab
+  rules:
+    - when: manual
+  environment: $CI_COMMIT_REF_NAME
+  image: docker.io/docker:24.0
+  #needs:
+  #  - backend-retag
+  #  - frontend-retag
+  variables:
+    DOCKER_HOST: "ssh://$DEPLOY_SSH_USER@$DEPLOY_HOSTNAME"
+  before_script:
+    - mkdir -p secret
+    - echo "$DB_ENV" > secret/db.env
+    - echo "$RUNTIME_ENV" > secret/runtime.env
+    - echo "Adding SSH Key"
+    - mkdir -p ~/.ssh
+    - echo "$DEPLOY_SSH_KEY" > ~/.ssh/gitlab
+    - chmod 400 ~/.ssh/gitlab
+    - echo 'IdentityFile ~/.ssh/gitlab' > ~/.ssh/config
+    - ssh-keyscan -H $DEPLOY_HOSTNAME >> ~/.ssh/known_hosts
+  script:
+    - |
+      docker compose \
+        --project-name="mastweb" \
+        --file "compose.prod.yml" \
+        up --detach --force-recreate --pull="always"

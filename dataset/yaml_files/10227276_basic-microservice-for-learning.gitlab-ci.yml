@@ -1,0 +1,133 @@
+---
+
+stages:
+  - test-lint
+  - build
+  - test-compose
+  - image-push
+  - deploy
+
+test-lint:
+  image: python:alpine3.7
+  stage: test-lint
+  only:
+    changes:
+      - services/**/*.py
+  script:
+    - apk add --no-cache --update python3-dev  gcc build-base
+    - pip install pylint
+    - pip install flask
+    - pip install requests
+    - pip install prometheus_client
+    - pylint services/**/*.py --disable=all --enable=F,E,unreachable,duplicate-key,unnecessary-semicolon,global-variable-not-assigned,unused-variable,binary-op-exception,bad-format-string,anomalous-backslash-in-string,bad-open-mode
+
+build-calculator:
+  image: docker:stable
+  services:
+    - docker:dind
+  variables:
+    CONTAINER_IMAGE: registry.gitlab.com/$CI_PROJECT_PATH
+  stage: build
+  tags:
+    - docker
+  only:
+    changes:
+      - services/calculator/*
+  script:
+    - docker build --tag $CONTAINER_IMAGE/calculator:$CI_COMMIT_SHA services/calculator/.
+
+build-random_num:
+  image: docker:stable
+  services:
+    - docker:dind
+  variables:
+    CONTAINER_IMAGE: registry.gitlab.com/$CI_PROJECT_PATH
+  stage: build
+  tags:
+    - docker
+  only:
+    changes:
+      - services/random_num/*
+  script:
+    - docker build --tag $CONTAINER_IMAGE/random_num:$CI_COMMIT_SHA services/random_num/.
+
+build-database:
+  image: docker:stable
+  services:
+    - docker:dind
+  variables:
+    CONTAINER_IMAGE: registry.gitlab.com/$CI_PROJECT_PATH
+  stage: build
+  tags:
+    - docker
+  only:
+    changes:
+      - services/database/*
+  script:
+    - docker build --tag $CONTAINER_IMAGE/database:$CI_COMMIT_SHA services/database/.
+
+docker-compose-buildtest:
+  image: 
+    name: docker/compose:1.23.2
+    entrypoint: [""]
+  variables:
+    DOCKER_HOST: tcp://docker:2375/
+    DOCKER_DRIVER: overlay2
+  services:
+    - docker:dind
+  stage: test-compose
+  tags:
+    - docker
+  only:
+    changes:
+      - docker-compose.yaml
+      - services/**/*.py
+  script:
+    - docker-compose up -d
+
+docker-pushcontainer:
+  image: docker:stable
+  services:
+    - docker:dind
+  stage: image-push
+  tags:
+    - docker
+  only:
+    refs:
+      - merge_requests
+    changes:
+      - services/**/*
+      - .gitlab-ci.yml
+      - Dockerfile
+  script:
+    - docker login -u $GITLAB_REG_USER -p $GITLAB_REG_PASS registry.gitlab.com
+    - docker build --tag registry.gitlab.com/keiran.steele/basic-microservice-for-learning/calculator:$CI_COMMIT_SHA services/calculator/.
+    - docker tag registry.gitlab.com/keiran.steele/basic-microservice-for-learning/calculator:$CI_COMMIT_SHA registry.gitlab.com/keiran.steele/basic-microservice-for-learning/calculator:latest_dev
+    - docker push registry.gitlab.com/keiran.steele/basic-microservice-for-learning/calculator:$CI_COMMIT_SHA
+    - docker push registry.gitlab.com/keiran.steele/basic-microservice-for-learning/calculator:latest_dev
+    - docker build --tag registry.gitlab.com/keiran.steele/basic-microservice-for-learning/random_num:$CI_COMMIT_SHA services/random_num/.
+    - docker tag registry.gitlab.com/keiran.steele/basic-microservice-for-learning/random_num:$CI_COMMIT_SHA registry.gitlab.com/keiran.steele/basic-microservice-for-learning/random_num:latest_dev
+    - docker push registry.gitlab.com/keiran.steele/basic-microservice-for-learning/random_num:$CI_COMMIT_SHA
+    - docker push registry.gitlab.com/keiran.steele/basic-microservice-for-learning/random_num:latest_dev
+    - docker build --tag registry.gitlab.com/keiran.steele/basic-microservice-for-learning/database:$CI_COMMIT_SHA services/database/.
+    - docker tag registry.gitlab.com/keiran.steele/basic-microservice-for-learning/database:$CI_COMMIT_SHA registry.gitlab.com/keiran.steele/basic-microservice-for-learning/database:latest_dev
+    - docker push registry.gitlab.com/keiran.steele/basic-microservice-for-learning/database:$CI_COMMIT_SHA
+    - docker push registry.gitlab.com/keiran.steele/basic-microservice-for-learning/database:latest_dev
+
+deploy-dev:
+  image: lachlanevenson/k8s-kubectl:latest
+  stage: deploy
+  tags:
+    - kubernetes
+  environment:
+    name: development
+  only:
+    refs:
+      - tags
+      - Development
+  script:
+    - kubectl version 
+    - kubectl cluster-info
+    - kubectl apply -f kubernetes_dev/calculator_svc.yaml
+    - kubectl apply -f kubernetes_dev/randomnum_svc.yaml
+    - kubectl apply -f kubernetes_dev/database_svc.yaml

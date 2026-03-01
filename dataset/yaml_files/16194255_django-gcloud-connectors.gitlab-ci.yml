@@ -1,0 +1,314 @@
+stages:
+  - test
+  - deploy
+  - build
+  - publish
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: "$CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH"
+    - if: "$CI_COMMIT_TAG"
+
+.gcloud_init: &gcloud_init
+  - gcloud auth activate-service-account --key-file $SERVICE_ACCOUNT_KEY
+  - gcloud config set project $PROJECT_ID
+
+.gcloud_app_credentials: &gcloud_app_credentials
+  - export GOOGLE_APPLICATION_CREDENTIALS=$SERVICE_ACCOUNT_KEY
+
+# Every time the indexes changes push them to our project's base job
+.deploy-indexes:
+  image: registry.gitlab.com/potato-oss/google-cloud/django-gcloud-connectors/python310:latest
+  stage: deploy
+  before_script:
+    - *gcloud_init
+  script: gcloud app deploy .datastore/WEB-INF/index.yaml
+  rules:
+    - changes:
+        - .datastore/WEB-INF/index.yaml
+
+deploy-indexes-optimistic:
+  extends: .deploy-indexes
+  variables:
+    SERVICE_ACCOUNT_KEY: $OPTIMISTIC_PROJECT_SERVICE_ACCOUNT_KEY
+    PROJECT_ID: $OPTIMISTIC_PROJECT_ID
+
+deploy-indexes-pessimistic:
+  extends: .deploy-indexes
+  variables:
+    SERVICE_ACCOUNT_KEY: $PESSIMISTIC_PROJECT_SERVICE_ACCOUNT_KEY
+    PROJECT_ID: $PESSIMISTIC_PROJECT_ID
+
+# Base job to run real datastore tests
+.python310-42-real-datastore-base:
+  image: registry.gitlab.com/potato-oss/google-cloud/django-gcloud-connectors/python310:latest
+  stage: test
+  timeout: 2h
+  before_script:
+    - mkdir .reports
+    - SERVICE_ACCOUNT_KEY=$OPTIMISTIC_PROJECT_SERVICE_ACCOUNT_KEY
+    - PROJECT_ID=$OPTIMISTIC_PROJECT_ID
+    - *gcloud_app_credentials
+  script: GCLOUDC_PROJECT_ID=$PROJECT_ID tox -e py310-42 -- --settings=settings.test_settings --use-remote-datastore
+  artifacts:
+    reports:
+      junit: .reports/django-tests.xml
+
+# Base job to run real datastore on project with concurrrency set to optimistic
+.python310-42-real-datastore-optimistic-base:
+  extends: .python310-42-real-datastore-base
+  variables:
+    SERVICE_ACCOUNT_KEY: $OPTIMISTIC_PROJECT_SERVICE_ACCOUNT_KEY
+    PROJECT_ID: $OPTIMISTIC_PROJECT_ID
+
+# Base job to run real datastore on project with concurrrency set to pessimistic
+.python310-42-real-datastore-pessimistic-base:
+  extends: .python310-42-real-datastore-base
+  variables:
+    SERVICE_ACCOUNT_KEY: $PESSIMISTIC_PROJECT_SERVICE_ACCOUNT_KEY
+    PROJECT_ID: $PESSIMISTIC_PROJECT_ID
+
+python310-42-real-datastore-optimistic-manual:
+  extends: .python310-42-real-datastore-optimistic-base
+  when: manual
+
+python310-42-real-datastore-pessimistic-manual:
+  extends: .python310-42-real-datastore-pessimistic-base
+  when: manual
+
+python310-42:
+  image: registry.gitlab.com/potato-oss/google-cloud/django-gcloud-connectors/python310:latest
+  stage: test
+  before_script:
+    - mkdir .reports
+  script: tox -e py310-42 -- --settings=settings.test_settings
+  artifacts:
+    paths:
+      - profile.txt
+    reports:
+      junit: .reports/django-tests.xml
+
+python310-42-firestore:
+  image: registry.gitlab.com/potato-oss/google-cloud/django-gcloud-connectors/python310:latest
+  stage: test
+  before_script:
+    - mkdir .reports
+  script: tox -e py310-42 -- --settings=settings.test_settings_firestore
+  artifacts:
+    paths:
+      - profile.txt
+    reports:
+      junit: .reports/django-tests.xml
+
+python311-42:
+  image: registry.gitlab.com/potato-oss/google-cloud/django-gcloud-connectors/python311:latest
+  stage: test
+  before_script:
+    - mkdir .reports
+  script: tox -e py311-42 -- --settings=settings.test_settings
+  artifacts:
+    paths:
+      - profile.txt
+    reports:
+      junit: .reports/django-tests.xml
+
+python311-42-firestore:
+  image: registry.gitlab.com/potato-oss/google-cloud/django-gcloud-connectors/python311:latest
+  stage: test
+  before_script:
+    - mkdir .reports
+  script: tox -e py311-42 -- --settings=settings.test_settings_firestore
+  artifacts:
+    paths:
+      - profile.txt
+    reports:
+      junit: .reports/django-tests.xml
+
+python312-42:
+  image: registry.gitlab.com/potato-oss/google-cloud/django-gcloud-connectors/python312:latest
+  stage: test
+  before_script:
+    - mkdir .reports
+  script: tox -e py312-42 -- --settings=settings.test_settings
+  artifacts:
+    paths:
+      - profile.txt
+    reports:
+      junit: .reports/django-tests.xml
+
+python312-42-firestore:
+  image: registry.gitlab.com/potato-oss/google-cloud/django-gcloud-connectors/python312:latest
+  stage: test
+  before_script:
+    - mkdir .reports
+  script: tox -e py312-42 -- --settings=settings.test_settings_firestore
+  artifacts:
+    paths:
+      - profile.txt
+    reports:
+      junit: .reports/django-tests.xml
+
+python312-50:
+  image: registry.gitlab.com/potato-oss/google-cloud/django-gcloud-connectors/python312:latest
+  stage: test
+  before_script:
+    - mkdir .reports
+  script: tox -e py312-50 -- --settings=settings.test_settings
+  artifacts:
+    paths:
+      - profile.txt
+    reports:
+      junit: .reports/django-tests.xml
+
+python312-50-firestore:
+  image: registry.gitlab.com/potato-oss/google-cloud/django-gcloud-connectors/python312:latest
+  stage: test
+  before_script:
+    - mkdir .reports
+  script: tox -e py312-50 -- --settings=settings.test_settings_firestore
+  artifacts:
+    paths:
+      - profile.txt
+    reports:
+      junit: .reports/django-tests.xml
+
+python312-51:
+  image: registry.gitlab.com/potato-oss/google-cloud/django-gcloud-connectors/python312:latest
+  stage: test
+  before_script:
+    - mkdir .reports
+  script: tox -e py312-51 -- --settings=settings.test_settings
+  artifacts:
+    paths:
+      - profile.txt
+    reports:
+      junit: .reports/django-tests.xml
+
+python312-51-firestore:
+  image: registry.gitlab.com/potato-oss/google-cloud/django-gcloud-connectors/python312:latest
+  stage: test
+  before_script:
+    - mkdir .reports
+  script: tox -e py312-51 -- --settings=settings.test_settings_firestore
+  artifacts:
+    paths:
+      - profile.txt
+    reports:
+      junit: .reports/django-tests.xml
+
+python312-52:
+  image: registry.gitlab.com/potato-oss/google-cloud/django-gcloud-connectors/python312:latest
+  stage: test
+  before_script:
+    - mkdir .reports
+  script: tox -e py312-52 -- --settings=settings.test_settings
+  artifacts:
+    paths:
+      - profile.txt
+    reports:
+      junit: .reports/django-tests.xml
+
+python312-52-firestore:
+  image: registry.gitlab.com/potato-oss/google-cloud/django-gcloud-connectors/python312:latest
+  stage: test
+  before_script:
+    - mkdir .reports
+  script: tox -e py312-52 -- --settings=settings.test_settings_firestore
+  artifacts:
+    paths:
+      - profile.txt
+    reports:
+      junit: .reports/django-tests.xml
+
+python312-djangae:
+  allow_failure: true
+  image: registry.gitlab.com/potato-oss/google-cloud/django-gcloud-connectors/python312:latest
+  stage: test
+  before_script:
+    - mkdir .reports
+    - git clone https://gitlab.com/potato-oss/djangae/djangae.git
+  script:
+    - cd djangae
+    # Hack. We want to setup the tox env, so we just print the help
+    - tox -e py312-42 -- --help
+    - source .tox/py312-42/bin/activate # Active the venv and install this version of cloud connectors
+    - pip uninstall -y django-gcloud-connectors
+    - pip install git+https://gitlab.com/potato-oss/google-cloud/django-gcloud-connectors.git@$CI_COMMIT_SHA
+    - tox -e py312-42 -- --settings=settings.test_settings # Run the Djangae tests properly
+  artifacts:
+    reports:
+      junit: .reports/djangae-tests.xml
+
+test-docs:
+  image: python:3.9
+  stage: test
+  needs: [] # We can execute this out-of-order
+  before_script:
+    - pip install mkdocs>=1.1.2
+  script:
+    - mkdir -p test
+    - mkdocs build --strict --verbose --site-dir test
+  artifacts:
+    paths:
+      - test
+  except:
+    - master
+
+flake8:
+  image: registry.gitlab.com/potato-oss/google-cloud/django-gcloud-connectors/python310:latest
+  before_script:
+    - mkdir .reports
+  script: tox -e flake8 -- --format junit-xml --output-file=".reports/flake8.xml"
+  artifacts:
+    reports:
+      junit: .reports/flake8.xml
+
+build and test-publish:
+  stage: build
+  image: python:3.10
+  rules:
+    - if: $CI_COMMIT_TAG
+  before_script:
+    - pip install twine setuptools wheel
+    - rm -rf dist
+    - python setup.py sdist bdist_wheel
+  script:
+    - python -m twine upload --repository-url https://test.pypi.org/legacy/ dist/*
+  artifacts:
+    paths:
+      - dist
+  variables:
+    TWINE_PASSWORD: $TEST_PYPI_TOKEN
+    TWINE_USERNAME: __token__
+
+publish to prod pypi:
+  stage: publish
+  dependencies: ["build and test-publish"]
+  needs: ["build and test-publish"]
+  when: manual
+  image: python:3.10
+  rules:
+    - if: $CI_COMMIT_TAG
+  before_script:
+    - pip install twine
+  script:
+    - python -m twine upload --repository-url https://upload.pypi.org/legacy/ dist/*
+  variables:
+    TWINE_PASSWORD: $PROD_PYPI_TOKEN
+    TWINE_USERNAME: __token__
+
+pages:
+  image: python:3.9
+  stage: publish
+  needs: []
+  before_script:
+    - pip install mkdocs>=1.1.2
+  script:
+    - mkdir -p public
+    - mkdocs build --strict --verbose
+  artifacts:
+    paths:
+      - public
+  only:
+    - master

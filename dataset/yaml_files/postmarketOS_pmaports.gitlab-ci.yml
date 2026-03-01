@@ -1,0 +1,193 @@
+---
+
+# global settings
+image: alpine:latest
+before_script: &global_before_scripts
+  - apk upgrade -U
+after_script:
+  - .ci/lib/move_logs.sh $CI_PROJECT_DIR
+stages:
+  - lint
+  - build
+  - autoupdate
+variables:
+  # Default of 20 is pretty small, sometimes MRs have >20 commits in them. 100
+  # seems like a reasonable balance. If this is too low, git merge-base (from ci/
+  # common.py) can fail
+  GIT_DEPTH: 100
+  
+# This defines the rules for when a pipeline should run.
+workflow:
+  rules:
+    # Don't run branch pipeline if an MR is open (only the MR pipeline will run)
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS && $CI_PIPELINE_SOURCE == "push"
+      when: never
+    # Run for merge requests
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    # Run scheduled pipeline for autoupdate or manually triggered pipeline
+    - if: $CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web"
+
+# device documentation
+wiki:
+  stage: lint
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" || $CI_COMMIT_REF_PROTECTED == "false"
+      changes:
+        - .ci/**/*
+        - .gitlab-ci.yml
+        - device/*/device-*/*
+  script:
+    - .ci/lib/gitlab_prepare_ci.sh
+    - .ci/wiki.sh
+
+# testcases linting
+ruff:
+  stage: lint
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" || $CI_COMMIT_REF_PROTECTED == "false"
+      changes:
+        - .ci/*
+        - .ci/*/*
+        - .gitlab-ci.yml
+  script:
+    - .ci/lib/gitlab_prepare_ci.sh
+    - .ci/ruff.sh
+
+# shellcheck and various grep checks
+shellcheck-grep:
+  stage: lint
+  image: alpine:edge
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" || $CI_COMMIT_REF_PROTECTED == "false"
+  script:
+    - .ci/lib/gitlab_prepare_ci.sh
+    - .ci/shellcheck.sh
+    - .ci/grep.sh
+    - .ci/codeowners.sh
+
+editor-config:
+  stage: lint
+  image: alpine:edge
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" || $CI_COMMIT_REF_PROTECTED == "false"
+  script:
+    - .ci/lib/gitlab_prepare_ci.sh
+    - .ci/ec.sh
+
+# aports checks (generic)
+pytest-commits:
+  stage: lint
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" || $CI_COMMIT_REF_PROTECTED == "false"
+  script:
+    - .ci/lib/gitlab_prepare_ci.sh
+    - .ci/pytest.sh
+    - .ci/commits.sh
+  artifacts:
+    when: on_failure
+    paths:
+      - log.txt
+      - log_testsuite_pmaports.txt
+      - pmbootstrap.cfg
+    expire_in: 1 week
+
+# APKBUILD linting
+aport-lint:
+  stage: lint
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" || $CI_COMMIT_REF_PROTECTED == "false"
+  script:
+    - .ci/lib/gitlab_prepare_ci.sh
+    - .ci/apkbuild-lint.sh
+  allow_failure: true
+
+# kernel kconfig check
+kernel-kconfig:
+  stage: lint
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" || $CI_COMMIT_REF_PROTECTED == "false"
+      changes:
+        - kconfigcheck.toml
+        - device/*/linux-*/config-*
+        - main/linux-*/config-*
+  script:
+    - .ci/lib/gitlab_prepare_ci.sh
+    - .ci/kconfig.sh
+
+# MR settings
+# (Checks for "Allow commits from members who can merge to the target branch")
+mr-settings:
+  stage: lint
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  before_script:
+    - *global_before_scripts
+    - apk -q add python3
+  script:
+    - wget -q "https://gitlab.postmarketos.org/postmarketOS/ci-common/-/raw/master/check_mr_settings.py"
+    - python3 ./check_mr_settings.py
+
+# build changed aports
+.build:
+  stage: build
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" || $CI_COMMIT_REF_PROTECTED == "false"
+  before_script:
+    - *global_before_scripts
+    - .ci/lib/gitlab_prepare_ci.sh
+  after_script:
+    - cp -r /home/pmos/.local/var/pmbootstrap/packages/ packages/ || true
+  artifacts:
+    expire_in: 1 week
+    paths:
+      - packages/
+  timeout: 10 h
+
+build-x86_64:
+  extends: .build
+  script:
+    - .ci/build-x86_64.sh
+
+build-x86:
+  extends: .build
+  script:
+    - .ci/build-x86.sh
+
+build-aarch64:
+  extends: .build
+  script:
+    - .ci/build-aarch64.sh
+
+build-armv7:
+  extends: .build
+  script:
+    - .ci/build-armv7.sh
+
+build-armhf:
+  extends: .build
+  script:
+    - .ci/build-armhf.sh
+
+build-riscv64:
+  extends: .build
+  script:
+    - .ci/build-riscv64.sh
+
+auto-update:
+  stage: autoupdate
+  rules:
+    # This variable is set in the scheduled pipeline configuration. It should be a space separated list of
+    # package names to update.
+    - if: $AUTOUPDATE_PACKAGES != null && $CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web"
+  before_script:
+    - .ci/lib/gitlab_prepare_ci.sh
+  script:
+    - .ci/autoupdate.sh "$AUTOUPDATE_PACKAGES"
+  after_script:
+    - .ci/lib/move_logs.sh $CI_PROJECT_DIR
+  artifacts:
+    when: on_failure
+    paths:
+      - log.txt
+      - log_testsuite_pmaports.txt
+      - pmbootstrap.cfg

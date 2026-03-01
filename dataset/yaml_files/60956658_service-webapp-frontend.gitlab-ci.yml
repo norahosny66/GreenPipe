@@ -1,0 +1,6 @@
+include:
+  - project: 'entici/code/cicd/gitlab-ci_general'
+    file: 'update-readme-with-docker-tags.yml'
+
+stages:
+  - update_readme

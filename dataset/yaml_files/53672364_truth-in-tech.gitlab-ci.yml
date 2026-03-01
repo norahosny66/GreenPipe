@@ -1,0 +1,83 @@
+services:
+  - docker:dind
+
+stages:
+  - test
+  - build
+  - deploy
+
+# Run flake8 to check for code quality
+lint-test-job:
+  image: python:3-bullseye
+  stage: test
+  script:
+    - pip install flake8
+    - flake8 api
+
+# # Run the unit tests
+api-unit-tests-job:
+  image: python:3-bullseye
+  stage: test
+  variables:
+    DATABASE_URL: does-not-matter
+  needs:
+    - lint-test-job
+  script:
+    - cd api
+    - pip install -r requirements.txt
+    - python -m pytest
+
+# # Build API Image:
+build-api-image:
+  stage: build
+  image: docker:git
+  variables:
+    GITLAB_IMAGE: ${CI_REGISTRY_IMAGE}/api
+  before_script:
+    # $CI_JOB_TOKEN is variable automatically added by Gitlab: see https://docs.gitlab.com/ee/ci/variables/predefined_variables.html#variables-reference
+    - echo $CI_JOB_TOKEN | docker login -u gitlab-ci-token registry.gitlab.com --password-stdin
+  script:
+    - docker build --tag $GITLAB_IMAGE:latest ./api
+    - docker push $GITLAB_IMAGE:latest
+  only:
+    - main
+
+
+# # Build the React/JavaScript front-end
+build-front-end-job:
+  stage: build
+  image: node:lts-bullseye
+  needs:
+    - lint-test-job
+  variables:
+    # If either of these variables is defined in the GitLab
+    # CI/CD variables, that value will override the value here.
+    # You need to substitute in your real values for
+    # GROUP_NAME, PROJECT_NAME, & WEBSERVICE_NAME below.
+    PUBLIC_URL: https://truth-in-tech.gitlab.io/truth-in-tech/
+    REACT_APP_API_HOST: https://oct-2023-7-pt-api2.mod3projects.com
+  script:
+    - cd ghi
+    - npm install
+    - npm run build
+    # The following line creates a _redirects file to redirect all URLs to index.html
+    # Documentation: https://docs.gitlab.com/ee/user/project/pages/redirects.html#rewrite-all-requests-to-a-root-indexhtml
+    - echo "/* /index.html 200" > build/_redirects
+  artifacts:
+    paths:
+      - ghi/build/
+
+# Deploy the React/JavaScript front-end to GitLab pages
+pages:
+  stage: deploy
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  dependencies:
+    - build-front-end-job
+  needs:
+    - build-front-end-job
+  script:
+    - mv ghi/build/ public
+  artifacts:
+    paths:
+      - public

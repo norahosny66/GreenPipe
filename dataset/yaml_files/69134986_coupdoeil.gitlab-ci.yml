@@ -1,0 +1,20 @@
+image: ruby:latest
+
+variables:
+  JEKYLL_ENV: production
+
+create-pages:
+  pages:
+    # The folder that contains the files to be exposed at the Page URL
+    publish: public
+  rules:
+    - if: $CI_COMMIT_TAG
+  # Functions that should be executed before the build script is run
+  before_script:
+    - cd docs
+  script:
+    - bundle install
+    - bundle exec jekyll build -d ../public
+  artifacts:
+    paths:
+      - public

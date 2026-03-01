@@ -1,0 +1,78 @@
+workflow:
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: "$CI_COMMIT_TAG"
+
+variables:
+  # CONTAINER_REGISTRY: "${CI_REGISTRY}/${CI_PROJECT_PATH}"
+  CONTAINER_REGISTRY: "registry.gitlab.com/oxidize-2025-trustable/cargo-upgrades"
+  IMAGE_ID: "rust:main"
+
+include:
+  # Note, the SHA below is https://gitlab.com/rust-ci/rust-ci/-/tags/1.4.0
+  - component: "$CI_SERVER_FQDN/rust-ci/rust-ci/base-pipeline@6160771aad8f86529b269fb490d1b5c53a61f0c9"
+    inputs:
+      rust-image: "${CONTAINER_REGISTRY}/${IMAGE_ID}"
+      #pages-image: "${CONTAINER_REGISTRY}/${IMAGE_ID}"
+      before:
+        - export CARGO_HOME
+      install-all-tools: false
+
+clippy-beta:
+  rules:
+    - when: never
+
+trudag-lint:
+  stage: lint
+  image: "${CONTAINER_REGISTRY}/${IMAGE_ID}"
+  script:
+    - trudag manage lint --fail-on-error
+  artifacts:
+    paths:
+      - trustable/*
+
+.mkdocs-build:
+  image: "${CONTAINER_REGISTRY}/${IMAGE_ID}"
+  stage: docs
+  needs:
+    - "trudag-lint"
+  before_script: []
+  script:
+    - trudag publish -n cargo-upgrades-demo -a --validate
+    - mkdocs build
+  artifacts:
+    paths:
+      - public
+    expire_in: 3 days
+
+# For MR pipelines, publish to a review environment keyed on the MR number
+mkdocs-review:
+  extends: .mkdocs-build
+  after_script:
+    - echo "REVIEW_URL=${CI_PAGES_URL%%://*}://${CI_PROJECT_ROOT_NAMESPACE}.${CI_PAGES_DOMAIN}/-/${CI_PROJECT_PATH#*/}/-/jobs/${CI_JOB_ID}/artifacts/public/doorstop/nav.html" > review.env
+  artifacts:
+    reports:
+      dotenv: review.env
+  environment:
+    name: review/$CI_MERGE_REQUEST_IID
+    url: $REVIEW_URL
+  rules:
+    - if: $CI_MERGE_REQUEST_IID
+
+# For mainline or tags, publish to default GitLab Pages environment
+mkdocs:
+  extends: .mkdocs-build
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+  needs:
+    - test
+
+# Override the needs specified by the pages job included from rust-ci.
+# The mkdocs job imports and preserves the artifacts created by the
+# over-ridden dependency "doc (rust-ci)"
+pages:
+  needs:
+    - mkdocs
+    - doc

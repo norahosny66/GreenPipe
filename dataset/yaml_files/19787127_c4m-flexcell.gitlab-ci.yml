@@ -1,0 +1,66 @@
+image: quay.io/chips4makers/build4ci:dev
+
+variables:
+  GIT_DEPTH: 0
+
+.default_rules:
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - when: on_success
+
+dco_init:
+  stage: .pre
+  rules:
+    - !reference [.default_rules, rules]
+  script:
+    - dco-check
+    - pdm use cpython@3.9
+    - pdm install -d -G dev
+  artifacts:
+    paths:
+      - pdm.lock
+      - .pdm-python
+      - .venv
+
+license:
+  stage: .pre
+  image: docker:latest
+  services:
+    - name: "docker:dind"
+  before_script: [] # We don't need to install our dependencies for this
+  rules:
+    - !reference [.default_rules, rules]
+  script:
+    # Use Google's `addlicence` to check for SPDX-License-Identifier header
+    # See: https://github.com/google/addlicense
+    - docker run --platform=linux/amd64 -v ${PWD}:/src ghcr.io/google/addlicense -v -check -s=only c4m
+    # Check if license header has right format
+    - grep -r SPDX-License-Identifier c4m | if grep -q -v "AGPL-3.0-or-later OR GPL-2.0-or-later OR CERN-OHL-S-2.0+ OR Apache-2.0"; then echo "wrong SPDX header"; exit 20; fi
+
+dist:
+  stage: deploy
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: on_success
+    - when: never
+  variables:
+    TWINE_PASSWORD: '${CI_JOB_TOKEN}'
+    TWINE_USERNAME: 'gitlab-ci-token'
+    TWINE_REPOSITORY_URL: 'https://gitlab.com/api/v4/projects/${CI_PROJECT_ID}/packages/pypi'
+  script:
+    - pdm build
+    - twine check --strict dist/*
+    - twine upload --verbose dist/*
+
+dist-test:
+  stage: deploy
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: never
+    - when: on_success
+  script:
+    - pdm build
+    - twine check --strict dist/*

@@ -1,0 +1,23 @@
+# CI config using variables, `extend`, and `includes`
+
+stages:
+  - test
+
+.job:
+  image: node:10
+  stage: test
+  before_script:
+    - cd $DIR
+    - yarn install --pure-lockfile --prefer-offline --cache-folder .yarn
+  script:
+    - yarn test
+    - yarn build
+  cache:
+    key: $DIR
+    paths:
+      - $DIR/.yarn
+      - $DIR/node_modules/
+
+include:
+  - local: '/client/.gitlab-ci.yml'
+  - local: '/server/.gitlab-ci.yml'

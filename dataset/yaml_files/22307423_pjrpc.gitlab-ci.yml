@@ -1,0 +1,25 @@
+image: golang:1.25-trixie
+
+stages:
+  - new_code
+
+job_testing:
+  stage: new_code
+  only: [merge_requests, tags]
+  tags:
+    - gitlab-org-docker
+  coverage: '/^\d+.\d+%$/'
+  script:
+    - make test
+    - make coverage
+    - cp profile.cov coverage.txt
+    - bash <(curl -s https://codecov.io/bash) -t $CODECOV_TOKEN
+
+job_linters:
+  stage: new_code
+  only: [merge_requests, tags]
+  tags:
+    - gitlab-org-docker
+  image: golangci/golangci-lint:v2.8.0
+  script:
+    - make lints

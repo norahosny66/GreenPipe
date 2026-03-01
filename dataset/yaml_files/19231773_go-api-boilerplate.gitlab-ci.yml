@@ -1,0 +1,66 @@
+image: docker:19.03.11-git
+
+variables:
+  DOCKER_DRIVER: overlay2
+
+stages:
+  # - merge
+  - github
+  - build
+  - test
+  - push
+
+services:
+  - docker:19.03.0-dind
+
+# merge:
+#   before_script:
+#     - git --version
+#   stage: merge
+#   image: snpranav/alpine-git-sh:3.12.0
+#   script:
+#     - >
+#       git merge origin/GITHUB_CI_PUSH
+#       if [ $? -eq 0 ]
+#       then
+#         git push -d origin GITHUB_CI_PUSH
+#         git push --all https://$github_username:$github_push_token@github.com/snpranav/go-api-boilerplate.git
+#       else
+#         echo "No GITHUB branch needs to be merged."
+#       fi
+
+sync:
+  before_script:
+    - docker info
+  stage: github
+  script:
+    - git pull origin master
+    - git push https://$github_username:$github_push_token@github.com/snpranav/go-api-boilerplate.git HEAD:master
+
+build:
+  before_script:
+    - docker info
+  stage: build
+  script:
+    - docker build -t registry.gitlab.com/snpranav/go-api-boilerplate:alpine-dev .
+    - docker login --username $docker_username --password $gitlab_cr_token registry.gitlab.com
+    - docker push registry.gitlab.com/snpranav/go-api-boilerplate:alpine-dev
+
+test:
+  before_script:
+    - docker info
+  stage: test
+  script:
+    - docker run --rm --name api-tests -d registry.gitlab.com/snpranav/go-api-boilerplate:alpine-dev
+    - docker exec api-tests /bin/sh -c "/go/src/gitlab.com/snpranav/go-api-boilerplate/api-check"
+
+push:
+  before_script:
+    - docker info
+  stage: push
+  script:
+    - docker build -t docker.io/snpranav/go-api-boilerplate:alpine .
+    - docker build -t docker.io/snpranav/go-api-boilerplate:latest .
+    - docker login --username $docker_username --password $docker_password
+    - docker push docker.io/snpranav/go-api-boilerplate:alpine
+    - docker push docker.io/snpranav/go-api-boilerplate:latest

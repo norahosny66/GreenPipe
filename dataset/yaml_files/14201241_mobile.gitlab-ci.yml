@@ -1,0 +1,163 @@
+# You can override the included template(s) by including variable overrides
+# See https://docs.gitlab.com/ee/user/application_security/sast/#customizing-the-sast-settings
+# Note that environment variables can be set in several places
+# See https://docs.gitlab.com/ee/ci/variables/#priority-of-environment-variables
+stages:
+  - test
+  - build
+  - deploy dev
+  - deploy prod
+
+cache:
+  paths:
+    - node_modules/
+  key:
+    files:
+      - package.json
+
+typescript test:
+  stage: test
+  image: node:16
+  before_script:
+    - echo "unsafe-perm = true" > .npmrc
+    - npm install --prefer-offline
+  script:
+    - npm run tsc
+
+eslint test:
+  stage: test
+  image: node:16
+  before_script:
+    - echo "unsafe-perm = true" > .npmrc
+    - npm install --prefer-offline
+  script:
+    - npm run lint
+
+unit test:
+  stage: test
+  image: node:16
+  before_script:
+    - echo "unsafe-perm = true" > .npmrc
+    - npm install --prefer-offline
+  script:
+    - npm run test
+
+build apk android:
+  only:
+    - tags
+  needs:
+    - typescript test
+    - eslint test
+    - unit test
+  image: reactnativecommunity/react-native-android:5
+  stage: build
+  script:
+    - npm install --global npm
+    - export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+    - echo fs.inotify.max_user_watches=524288 | tee -a /etc/sysctl.conf && sysctl -p
+    - echo "$ANDROID_KEYSTORE" | base64 -d > ./android/app/topic.keystore
+    - echo "unsafe-perm = true" > .npmrc
+    - npm install
+    - cd android/
+    - ./gradlew assembleRelease
+  artifacts:
+    paths:
+      - './android/app/build/outputs/apk/release'
+
+build bundle android:
+  only:
+    - tags
+  needs:
+    - typescript test
+    - eslint test
+    - unit test
+  image: reactnativecommunity/react-native-android:5
+  stage: build
+  script:
+    - npm install --global npm
+    - export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+    - echo fs.inotify.max_user_watches=524288 | tee -a /etc/sysctl.conf && sysctl -p
+    - echo "$ANDROID_KEYSTORE" | base64 -d > ./android/app/topic.keystore
+    - echo "unsafe-perm = true" > .npmrc
+    - npm install
+    - cd android/
+    - ./gradlew bundleRelease
+  artifacts:
+    paths:
+      - './android/app/build/outputs/bundle/release'
+
+build web:
+  only:
+    - tags
+  image: docker:stable
+  needs:
+    - unit test
+    - eslint test
+    - typescript test
+  stage: build
+  services:
+    - docker:dind
+  script:
+    - export IMG_FULLNAME=$CI_REGISTRY_IMAGE:$CI_COMMIT_TAG
+    - docker build -t $IMG_FULLNAME .
+    - docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY
+    - docker push $IMG_FULLNAME
+
+deploy web dev:
+  stage: deploy dev
+  needs:
+    - build web
+  image: alpine
+  tags:
+    - devserver
+  only:
+    - tags
+  environment:
+    name: dev
+    url: https://dev.topicapp.fr
+  resource_group: devdeploy
+  before_script:
+    - apk add openssh-client
+    - eval $(ssh-agent -s)
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - echo "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+    - chmod 644 ~/.ssh/known_hosts
+  script:
+    - ssh gitlab@ssh-dev.topicapp.fr "cd /home/topic/config/dev_main/topic && python <<< \"import envreplacer; envreplacer.replace('VERSION_TOPIC_MOBILE','$CI_COMMIT_TAG')\" && sudo -u topic /home/topic/config/dev_main/topic/deploy.sh"
+
+deploy web prod:
+  stage: deploy prod
+  needs:
+    - build web
+    - deploy web dev
+  image: alpine
+  tags:
+    - devserver
+  only:
+    - tags
+  when: manual
+  environment:
+    name: prod
+    url: https://topicapp.fr
+  resource_group: proddeploy
+  before_script:
+    - apk add openssh-client
+    - eval $(ssh-agent -s)
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - echo "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+    - chmod 644 ~/.ssh/known_hosts
+  script:
+    - ssh gitlab@ssh.topicapp.fr "cd /home/topic/config/prod_main/topic && python <<< \"import envreplacer; envreplacer.replace('VERSION_TOPIC_MOBILE','$CI_COMMIT_TAG')\" && sudo -u topic /home/topic/config/prod_main/topic/deploy.sh"
+
+variables:
+  DS_DEFAULT_ANALYZERS: 'gemnasium'
+  SAST_DEFAULT_ANALYZERS: nodejs-scan
+  SAST_EXCLUDED_ANALYZERS: 'semgrep, spotbugs, eslint'
+
+include:
+  - template: Security/SAST.gitlab-ci.yml
+  - template: Security/Dependency-Scanning.gitlab-ci.yml

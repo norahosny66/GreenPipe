@@ -1,0 +1,100 @@
+image: docker:stable
+
+stages:
+  - image
+  - deploy
+
+docker image:
+  stage: image
+  variables:
+    DOCKER_DRIVER: overlay2
+  services:
+    - docker:dind
+  script:
+    - docker login -u gitlab-ci-token -p $CI_JOB_TOKEN registry.gitlab.com
+    - docker build -t registry.gitlab.com/openstapps/app-release-template .
+    - docker push registry.gitlab.com/openstapps/app-release-template
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" && $BUILD_IMAGE == "true"'
+  tags:
+    - gitlab-org-docker
+
+web:
+  image: registry.gitlab.com/openstapps/app-release-template
+  stage: deploy
+  script:
+    - make web
+    - >
+      if [ "$RELEASE_TYPE" == "staging" || "$CI_COMMIT_BRANCH" == "develop" ]; then
+        # USE GITLAB PROTECTED & MASKED CI VARIABLES TO PROVIDE THE FOLLOWING DATA!
+        # THUS $STAGING_TARGET_SSH_PRIVATE_KEY HAS TO BE BASE64 ENCODED
+        # USE AN UNPRIVILIGED USER WITH ACCESS ONLY TO THIS DIRECTORY
+        # example: $STAGING_SCP_TARGET = deployuser@staging.environment.com:/path/for/web/data
+        sh static/scripts/ssh_deploy.sh web $STAGING_SCP_TARGET $STAGING_TARGET_SSH_PRIVATE_KEY
+      fi
+
+      if [ "$RELEASE_TYPE" == "production" ]; then
+        # USE GITLAB PROTECTED & MASKED CI VARIABLES TO PROVIDE THE FOLLOWING DATA!
+        # THUS $PRODUCTION_TARGET_SSH_PRIVATE_KEY HAS TO BE BASE64 ENCODED
+        # USE AN UNPRIVILIGED USER WITH ACCESS ONLY TO THIS DIRECTORY
+        # example: $PRODUCTION_SCP_TARGET = deployuser@production.environment.com:/path/for/web/data
+        sh static/scripts/ssh_deploy.sh web $PRODUCTION_SCP_TARGET $PRODUCTION_TARGET_SSH_PRIVATE_KEY
+      fi
+  artifacts:
+    untracked: false
+    paths:
+      - www.zip
+  tags:
+    - docker
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+    - if: '$CI_COMMIT_BRANCH == "main" && $RELEASE_TYPE == "staging"'
+    - if: '$CI_COMMIT_BRANCH == "main" && $RELEASE_TYPE == "production"'
+
+ios:
+  image: registry.gitlab.com/openstapps/app-release-template
+  stage: deploy
+  script:
+    - >
+      if [ "$RELEASE_TYPE" == "staging" ]; then
+        make ios-beta;
+      fi
+
+      if [ "$RELEASE_TYPE" == "production" ]; then
+        make ios;
+      fi
+  artifacts:
+    untracked: false
+  tags:
+    - macos
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" && $RELEASE_TYPE == "staging"'
+    - if: '$CI_COMMIT_BRANCH == "main" && $RELEASE_TYPE == "production"'
+
+android:
+  image: registry.gitlab.com/openstapps/app-release-template
+  stage: deploy
+  script:
+    - >
+      if [ "$RELEASE_TYPE" == "staging" ]; then
+        make android-internal-beta;
+      fi
+
+      if [ "$RELEASE_TYPE" == "production" ]; then
+        make android;
+
+        # USE GITLAB PROTECTED & MASKED CI VARIABLES TO PROVIDE THE FOLLOWING DATA!
+        # THUS $APK_TARGET_SSH_PRIVATE_KEY HAS TO BE BASE64 ENCODED
+        # USE AN UNPRIVILIGED USER WITH ACCESS ONLY TO THIS DIRECTORY
+        # example: $APK_SCP_TARGET = deployuser@your.apk.storage.com:/path/to/app.apk
+        if [ -n "$APK_SCP_TARGET" ]; then
+          sh static/scripts/ssh_deploy.sh apk $APK_SCP_TARGET $APK_TARGET_SSH_PRIVATE_KEY
+        fi
+      fi
+  artifacts:
+    untracked: false
+  tags:
+    - docker
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" && $RELEASE_TYPE == "staging"'
+    - if: '$CI_COMMIT_BRANCH == "main" && $RELEASE_TYPE == "production"'

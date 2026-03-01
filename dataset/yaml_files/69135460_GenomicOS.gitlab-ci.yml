@@ -1,0 +1,193 @@
+stages:
+  - build
+  - publish
+
+# TODO: document use of various architectures, arm64 and amd64, also embedded architectures
+
+variables:
+  BUILD_DIR: "out"
+  S3: "s3://genomicos-iso-builds"
+
+.build_iso_template: &build_iso
+  stage: build
+  image: debian:sid-slim
+  # TODO: Use our own iso builder image
+  # TODO: Set tagging options
+  before_script:
+    - |
+      echo ""
+      echo "═══════════════════════════════════════════════════════════════"
+      echo " BEFORE_SCRIPT :: GenomicOS Build Environment Setup"
+      echo " Commit: ${CI_COMMIT_SHORT_SHA:-unset} | Pipeline: #${CI_PIPELINE_ID:-unset}"
+      echo "═══════════════════════════════════════════════════════════════"
+      echo ""
+
+    - apt-get update
+    - |
+      if [ "$(uname -m)" = "x86_64" ]; then
+        # Install syslinux-utils only on x86_64
+        apt-get install -y live-build xorriso rsync curl git unzip syslinux-utils
+      else
+        # For ARM64, skip syslinux-utils
+        apt-get install -y live-build xorriso rsync curl git unzip
+      fi
+    - apt-get install -y genisoimage file ca-certificates gnupg
+    # Install AWS CLI v2
+    - |
+      if [ "$(uname -m)" = "x86_64" ]; then
+        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+      else
+        curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64-2.0.30.zip" -o "awscliv2.zip"
+      fi
+    - unzip awscliv2.zip
+    - ./aws/install
+    # Selft-hosted
+    - mkdir -p config/includes.chroot/etc/skel/Documents/git
+    # Clone the specific commit into Documents/GenomicOS
+    - |
+      if [ -n "${CI_JOB_TOKEN}" ]; then
+        # Method 1: If you have CI_JOB_TOKEN 
+        # (works for private repos in same GitLab instance)
+        echo "Using CI_JOB_TOKEN for authentication"
+        git clone ${CI_PROJECT_URL}.git config/includes.chroot/etc/skel/Documents/git
+      else
+        # Method 2: Public repository
+        echo "Cloning public repository"
+        git clone ${CI_PROJECT_URL}.git config/includes.chroot/etc/skel/Documents/git
+      fi
+
+build_amd64_iso:
+  <<: *build_iso
+  variables:
+    ARTIFACT_NAME: "genomicos_amd64.iso"
+  script:
+    - |
+      echo "──────────────────────────────────────────────"
+      echo " Building AMD64 ISO"
+      echo "──────────────────────────────────────────────"
+
+    # TODO: move over to auto/clean
+    - lb clean
+    # TODO: Document use of auto/*
+    - auto/config_amd64
+    - lb build
+    - mkdir -p "$BUILD_DIR"
+    - mv live-image-amd64.hybrid.iso "$BUILD_DIR/$ARTIFACT_NAME"
+    - sha256sum "$BUILD_DIR/$ARTIFACT_NAME" > "$BUILD_DIR/$ARTIFACT_NAME".sha256
+    - aws s3 cp "$BUILD_DIR/$ARTIFACT_NAME" $S3/
+    - aws s3 cp "$BUILD_DIR/$ARTIFACT_NAME".sha256 $S3/
+    - echo "=== ISO Info ==="
+    - file "$BUILD_DIR/$ARTIFACT_NAME"
+    - ls -lh "$BUILD_DIR/$ARTIFACT_NAME"
+    - echo "=== ISO Structure Check ==="
+    - isoinfo -d -i "$BUILD_DIR/$ARTIFACT_NAME"
+    - echo "=== Boot Files Check ==="
+    - isoinfo -l -i "$BUILD_DIR/$ARTIFACT_NAME" | grep -E "(isolinux|grub|boot)" || true
+
+build_arm64_iso:
+  <<: *build_iso
+  tags:
+    - arm64
+  variables:
+    ARTIFACT_NAME: "genomicos_arm64.iso"
+  script:
+    - |
+      echo "──────────────────────────────────────────────"
+      echo " Building ARM64 ISO"
+      echo "──────────────────────────────────────────────"
+
+    # TODO: move over to auto/clean
+    - lb clean
+    # TODO: Document use of auto/*
+    - auto/config_arm64
+    - lb build
+    - mkdir -p "$BUILD_DIR"
+    - mv live-image-arm64.hybrid.iso "$BUILD_DIR/$ARTIFACT_NAME"
+    - sha256sum "$BUILD_DIR/$ARTIFACT_NAME" > "$BUILD_DIR/$ARTIFACT_NAME".sha256
+    - aws s3 cp "$BUILD_DIR/$ARTIFACT_NAME" $S3/
+    - aws s3 cp "$BUILD_DIR/$ARTIFACT_NAME".sha256 $S3/
+    - echo "=== ISO Info ==="
+    - file "$BUILD_DIR/$ARTIFACT_NAME"
+    - ls -lh "$BUILD_DIR/$ARTIFACT_NAME"
+    - echo "=== ISO Structure Check ==="
+    - isoinfo -d -i "$BUILD_DIR/$ARTIFACT_NAME"
+    - echo "=== Boot Files Check ==="
+    - isoinfo -l -i "$BUILD_DIR/$ARTIFACT_NAME" | grep -E "(isolinux|grub|boot)" || true
+
+# Re-usable template stays the same; we reuse *build_iso to keep env setup & AWS CLI
+# New job: build ARM64 rootfs tarball with live-build and push to S3
+build_arm64_rootfs_tar:
+  <<: *build_iso
+  tags:
+    - arm64
+  variables:
+    ARTIFACT_NAME: "genomicos_arm64_rootfs.tar"
+    # Optional: separate bucket for rootfs tarballs; falls back to $S3 if unset
+    #S3_TAR: "s3://genomicos-rootfs-builds"
+  script:
+    - |
+      echo "──────────────────────────────────────────────"
+      echo " Building ARM64 rootfs .tar with live-build"
+      echo "──────────────────────────────────────────────"
+    - lb clean
+    - auto/config_arm64_rootfs
+    - lb build
+    - |
+      TAR_PATH=""
+      for p in "live-image-arm64.tar" "live-image-arm64.tar.gz" "live-image-arm64.tar.tar" \
+               "live/live-image-arm64.tar" "live/live-image-arm64.tar.gz"; do
+        if [ -f "$p" ]; then TAR_PATH="$p"; break; fi
+      done
+      
+      if [ -z "$TAR_PATH" ]; then
+        echo "ERROR: no rootfs tarball found!"
+        find . -maxdepth 2 -type f
+        exit 1
+      fi
+
+      mkdir -p "$BUILD_DIR"
+      # normalize to .tar for downstream
+      if [[ "$TAR_PATH" == *.gz ]]; then
+        gunzip -c "$TAR_PATH" > "$BUILD_DIR/$ARTIFACT_NAME"
+      else
+        mv "$TAR_PATH" "$BUILD_DIR/$ARTIFACT_NAME"
+      fi
+    - sha256sum "$BUILD_DIR/$ARTIFACT_NAME" > "$BUILD_DIR/$ARTIFACT_NAME".sha256
+    - aws s3 cp "$BUILD_DIR/$ARTIFACT_NAME" "${S3_TAR:-$S3}/"
+    - aws s3 cp "$BUILD_DIR/$ARTIFACT_NAME".sha256 "${S3_TAR:-$S3}/"
+    - echo "=== TAR Info ==="
+    - file "$BUILD_DIR/$ARTIFACT_NAME"
+    - ls -lh "$BUILD_DIR/$ARTIFACT_NAME"
+
+# TODO: Pipelines related to documentation should run regardless of iso build jobs
+build_docs:
+  stage: build
+  image: 
+    name: node:22-slim
+  script:
+    - |
+      echo "──────────────────────────────────────────────"
+      echo " Building Documentation"
+      echo "──────────────────────────────────────────────"
+    - cd docs/quartz
+    - npm install
+    - npx quartz build
+  artifacts:
+    paths:
+      - docs/quartz/public
+    expire_in: 1 hour
+
+publish_docs_to_s3:
+  stage: publish
+  image:
+    name: amazon/aws-cli:2.13.13
+    entrypoint: [""]
+  script:
+    - |
+      echo "────────────────────────────────────────────────"
+      echo " Publishing Documentation to docs.genomicos.com "
+      echo "────────────────────────────────────────────────"
+    - aws s3 sync docs/quartz/public/ s3://docs.genomicos.com/ --delete
+    - aws cloudfront create-invalidation --distribution-id E1RP0ZCA1CSJZR --paths "/*"
+  dependencies:
+    - build_docs

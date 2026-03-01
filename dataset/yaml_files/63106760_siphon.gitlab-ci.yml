@@ -1,0 +1,298 @@
+image: golang:1.25
+
+stages:
+  - prepare
+  - build
+  - version_check
+  - test
+  - release
+
+variables:
+  GOPATH: $CI_PROJECT_DIR/.go
+  POSTGRES_DB: testdb
+  POSTGRES_USER: replication_test
+  POSTGRES_PASSWORD: replication_test_password
+  POSTGRES_HOST: postgres
+  DOCKER_VERSION: "26.1.3"
+  GOMODCACHE: $CI_PROJECT_DIR/.go-mod-cache
+  # Golang: Use the latest minor release for the target version
+  GO_VERSION: "1.25"
+  GOLANG_CI_LINT: golangci/golangci-lint:v2.8.0
+
+.docker:
+  image: docker:${DOCKER_VERSION}-dind
+  services:
+    - docker:${DOCKER_VERSION}-dind
+  variables:
+    DOCKER_DRIVER: overlay2
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_VERIFY: 1
+    DOCKER_TLS_CERTDIR: "/certs"
+    DOCKER_CERT_PATH: "/certs/client"
+  tags:
+    - gitlab-org-docker
+
+.golangci-lint:
+  stage: test
+  image: $GOLANG_CI_LINT
+  variables:
+    GOLANGCI_LINT_CACHE: $CI_PROJECT_DIR/golangci-lint
+  cache:
+    key: golangci-lint-cache
+    paths:
+      - $GOLANGCI_LINT_CACHE
+    policy: pull-push
+
+.go-mod-cache:
+  cache:
+    key: gomod-cache
+    paths:
+      - $GOMODCACHE
+    policy: pull
+
+gomod download:
+  stage: prepare
+  script:
+    - go mod download
+  extends: .go-mod-cache
+  cache:
+    policy: pull-push
+
+build:
+  stage: build
+  extends:
+    - .go-mod-cache
+  script:
+    - make build
+  artifacts:
+    name: "siphon-binaries"
+    paths:
+      - bin/*
+    expire_in: 1 day
+
+lint:
+  needs: ["build"]
+  extends:
+    - .go-mod-cache
+    - .golangci-lint
+  script:
+    - golangci-lint run --allow-parallel-runners --timeout 10m
+
+consumer_tests:
+  needs: ["build"]
+  stage: test
+  image: golang:${GO_VERSION}
+  extends:
+    - .go-mod-cache
+    - .docker
+  script:
+    - wget https://gitlab.com/gitlab-org/gitlab/-/raw/master/db/structure.sql
+    - go run github.com/onsi/ginkgo/v2/ginkgo -r -v --coverprofile=coverage.out ./pkg/consumers/...
+    - go tool cover -func=coverage.out
+  coverage: '/total:\s+\(statements\)\s+\d+.\d+%/'
+
+producer_tests:
+  needs: ["build"]
+  stage: test
+  image: golang:${GO_VERSION}
+  extends:
+    - .go-mod-cache
+    - .docker
+  script:
+    - wget https://gitlab.com/gitlab-org/gitlab/-/raw/master/db/structure.sql
+    - go run github.com/onsi/ginkgo/v2/ginkgo -r -v --coverprofile=coverage.out ./pkg/siphon/...
+    - go tool cover -func=coverage.out
+  coverage: '/total:\s+\(statements\)\s+\d+.\d+%/'
+
+common_tests:
+  needs: ["build"]
+  stage: test
+  image: golang:${GO_VERSION}
+  extends:
+    - .go-mod-cache
+    - .docker
+  script:
+    - wget https://gitlab.com/gitlab-org/gitlab/-/raw/master/db/structure.sql
+    - go run github.com/onsi/ginkgo/v2/ginkgo -r -v --coverprofile=coverage.out ./pkg/common/...
+    - go tool cover -func=coverage.out
+  coverage: '/total:\s+\(statements\)\s+\d+.\d+%/'
+
+.failover_version_check_template: &failover_version_check_definition
+  needs: ["build"]
+  stage: version_check
+  image: golang:${GO_VERSION}
+  services:
+    - name: postgres:${PG_VERSION}
+      alias: postgres
+      variables:
+        POSTGRES_DB: test_db
+        POSTGRES_USER: username
+        POSTGRES_PASSWORD: passwordpassword
+        POSTGRES_HOST_AUTH_METHOD: trust
+  script:
+    - cp ci_config.yml config.yml
+    - |
+      sed -i 's/failover: false/failover: true/g' config.yml
+    - make build
+    - output=$(bin/siphon 2>&1) || true
+    - echo "$output"
+    - |
+      error_substring="unsupported with failover enabled"
+      if [ ${PG_VERSION%%.*} -lt 17 ]; then
+        if echo "$output" | grep -q "$error_substring"; then
+          echo "PostgreSQL version ${PG_VERSION} with failover enabled correctly failed with an error message"
+          exit 0
+        else
+          echo "PostgreSQL version ${PG_VERSION} with failover enabled did not fail as expected"
+          exit 1
+        fi
+      else
+        if echo "$output" | grep -q "$error_substring"; then
+          echo "PostgreSQL version ${PG_VERSION} with failover enabled unexpectedly failed with an error message"
+          exit 1
+        else
+          echo "PostgreSQL version ${PG_VERSION} with failover enabled passed without errors as expected"
+          exit 0
+        fi
+      fi
+
+failover_version_check_pg14:
+  <<: *failover_version_check_definition
+  variables:
+    PG_VERSION: "14"
+
+failover_version_check_pg15:
+  <<: *failover_version_check_definition
+  variables:
+    PG_VERSION: "15"
+
+failover_version_check_pg16:
+  <<: *failover_version_check_definition
+  variables:
+    PG_VERSION: "16"
+
+# This one should pass if PG 17+ supports failover
+failover_version_check_pg17:
+  <<: *failover_version_check_definition
+  variables:
+    PG_VERSION: "17"
+
+.version_check_template: &version_check_definition
+  needs: ["build"]
+  stage: version_check
+  image: golang:${GO_VERSION}
+  services:
+    - name: postgres:${PG_VERSION}
+      alias: postgres
+      variables:
+        POSTGRES_DB: test_db
+        POSTGRES_USER: username
+        POSTGRES_PASSWORD: passwordpassword
+        POSTGRES_HOST_AUTH_METHOD: trust
+  script:
+    - cp ci_config.yml config.yml
+    - make build
+    - output=$(bin/siphon 2>&1) || true
+    - echo "$output"
+    - |
+      error_substring="which is unsupported"
+      if [ ${PG_VERSION%%.*} -le 13 ]; then
+        if echo "$output" | grep -q "$error_substring"; then
+          echo "PostgreSQL version ${PG_VERSION} correctly failed with an error message"
+          exit 0
+        else
+          echo "PostgreSQL version ${PG_VERSION} did not fail as expected"
+          exit 1
+        fi
+      else
+        if echo "$output" | grep -q "$error_substring"; then
+          echo "PostgreSQL version ${PG_VERSION} unexpectedly failed with an error message"
+          exit 1
+        else
+          echo "PostgreSQL version ${PG_VERSION} passed without errors as expected"
+          exit 0
+        fi
+      fi
+
+version_check_pg10:
+  <<: *version_check_definition
+  variables:
+    PG_VERSION: "10"
+
+version_check_pg11:
+  <<: *version_check_definition
+  variables:
+    PG_VERSION: "11"
+
+version_check_pg12:
+  <<: *version_check_definition
+  variables:
+    PG_VERSION: "12"
+
+version_check_pg13:
+  <<: *version_check_definition
+  variables:
+    PG_VERSION: "13"
+
+version_check_pg14:
+  <<: *version_check_definition
+  variables:
+    PG_VERSION: "14"
+
+version_check_pg15:
+  <<: *version_check_definition
+  variables:
+    PG_VERSION: "15"
+
+version_check_pg16:
+  <<: *version_check_definition
+  variables:
+    PG_VERSION: "16"
+
+version_check_pg17:
+  <<: *version_check_definition
+  variables:
+    PG_VERSION: "17"
+
+include: [
+  "e2e-testing/standard/e2e.ci.yml",
+  "e2e-testing/interrupted/interrupted.ci.yml",
+  "e2e-testing/changed_table/changed_database_table.ci.yml",
+  "e2e-testing/high_traffic/high_traffic.ci.yml",
+  "e2e-testing/partitions/new_partition.ci.yml"
+]
+
+release_job:
+  stage: release
+  image: docker:latest
+  needs: ["consumer_tests", "common_tests", "producer_tests"]
+  services:
+    - docker:dind
+  rules:
+    - if: $CI_COMMIT_TAG
+  before_script:
+    # Log in to Docker registry
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    # Build and push Docker image
+    - docker build -t $CI_REGISTRY_IMAGE:$CI_COMMIT_TAG .
+    - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_TAG
+
+    # Also tag as latest
+    - docker tag $CI_REGISTRY_IMAGE:$CI_COMMIT_TAG $CI_REGISTRY_IMAGE:latest
+    - docker push $CI_REGISTRY_IMAGE:latest
+
+    # Create GitLab release
+    - apk add --no-cache curl
+    - |
+      curl --request POST \
+        --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+        --header "Content-Type: application/json" \
+        --data '{
+          "name": "Release '"$CI_COMMIT_TAG"'",
+          "tag_name": "'"$CI_COMMIT_TAG"'",
+          "description": "Release '"$CI_COMMIT_TAG"'"
+        }' \
+        "$CI_API_V4_URL/projects/$CI_PROJECT_ID/releases"
+  variables:
+    DOCKER_TLS_CERTDIR: ""

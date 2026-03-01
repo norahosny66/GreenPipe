@@ -1,0 +1,51 @@
+image: docker:latest
+
+#Antes de Iniciar ingresamos docker hub
+stages:
+  - prueba
+  - inicio
+  - construir
+  - desplegar
+
+# informacion Basica del pipeline s  we 
+Informacion:
+  stage: inicio
+  environment:
+    name: desarrollo
+  services:
+    - docker:dind
+  script:
+    - echo "🚀Bienvenido al Pipeline de CI/CD"
+    - echo "Iniciar proyecto '$PROYECTO'" 
+    - docker --version
+    - docker run hello-world
+
+#Construimos y empaquetamos el proyecto y lo subimos a docker hub
+construir_docker_hub:
+  stage: construir
+  environment:
+    name: desarrollo
+  before_script:
+    - echo "Contruimos el proyecto para subirlo a Docker Hub"
+    - docker login -u "$USUARIO" -p "$PASSWORD"
+  services:
+    - docker:dind
+  script:
+    - docker build -t $PROYECTO:novus . 
+    - docker push $PROYECTO:novus
+
+# (CI/CD) Runner: Descargar  imagen de docker hubs y creamos una imagen y run
+desplegar_image:
+  stage: desplegar
+  environment:
+    name: desarrollo
+  tags:
+    - prueba
+  before_script:
+    - echo "Docker Hub Descargar $PROYECTO y desplegarlo con Runner "
+    - docker login -u "$USUARIO" -p "$PASSWORD"
+  script:
+    - docker login
+    - docker pull $PROYECTO
+    - docker run $PROYECTO
+  retry: 1 

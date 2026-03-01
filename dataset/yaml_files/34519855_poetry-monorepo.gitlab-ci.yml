@@ -1,0 +1,221 @@
+variables:
+  DOCKER_TLS_CERTDIR: "/certs"
+  DOCKER_HOST: tcp://docker:2376
+  # When using dind, it's wise to use the overlayfs driver for improved performance.
+  DOCKER_DRIVER: overlay2
+  IMAGE_SHA: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_MESSAGE =~ /^bump:/
+      when: never
+    - if: $CI_COMMIT_BRANCH
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+
+.packages_matrix: &packages-matrix
+  # used to run commands on individual packages
+  parallel:
+    matrix:
+      - PKG: ["package-a", "package-b", "service-c"]
+
+.services_matrix: &services-matrix
+  # to run service commands, like building docker files
+  parallel:
+    matrix:
+      - PKG: ["service-c"]
+
+stages:
+  - check
+  - test
+  - build packages
+  - build containers
+  - verify
+  - release
+  - bump
+
+default:
+  image: python:3.8
+
+cache:
+  key: "$CI_COMMIT_REF_SLUG"
+  paths:
+    - "**/.venv"
+    - .cache/pip
+    - .cache/poetry
+    - "*.cache"
+    - ~/.poetry
+
+.pyenv-prep_poetry: &pyenv-prep-poetry
+  - python -m pip install --upgrade pip
+  - pip install --upgrade virtualenv poetry
+
+.pyenv-prep_root: &pyenv-prep-root
+  - poetry install --sync
+
+.pyenv-prep_pkg: &pyenv-prep-pkg
+  - cd $PKG
+  - poetry install --sync
+
+.pyenv-prep_all: &pyenv-prep-all
+  - poetry install --sync
+  - cd package-a && poetry install --sync && cd ..
+  - cd package-b && poetry install --sync && cd ..
+  - cd service-c && poetry install --sync && cd ..
+
+mypy:
+  <<: *packages-matrix
+  stage: check
+  before_script:
+    - *pyenv-prep-poetry
+    - *pyenv-prep-pkg
+  script:
+    - poetry run mypy --config pyproject.toml --namespace-packages --explicit-package-bases .
+
+poetry check:
+  <<: *packages-matrix
+  stage: check
+  before_script:
+    - *pyenv-prep-poetry
+    - *pyenv-prep-pkg
+  script:
+    - poetry check
+
+style:
+  <<: *packages-matrix
+  stage: check
+  before_script:
+    - *pyenv-prep-poetry
+    - *pyenv-prep-pkg
+  script:
+    - poetry run flake8 .
+
+build all:
+  # build by modifying pyproject.toml's
+  stage: build packages
+  before_script:
+    - *pyenv-prep-poetry
+    - *pyenv-prep-all
+    - poetry run scripts/create_local_version.sh
+  script:
+    - scripts/poetry_build.sh
+  artifacts:
+    paths:
+      - "**/info/"
+      - "**/dist/"
+
+build:
+  # build by modifying the wheel & tar.gz's
+  <<: *packages-matrix
+  stage: build packages
+  before_script:
+    - apt-get update
+    - apt-get install -y zip unzip
+    - *pyenv-prep-poetry
+    - *pyenv-prep-root
+    - poetry run scripts/create_local_version.sh
+    - *pyenv-prep-pkg
+  script:
+    - poetry build
+    - ../scripts/replace_path_deps.sh
+  artifacts:
+    paths:
+      - "$PKG/dist"
+
+build with plugin:
+  # build using a Poetry plugin
+  <<: *packages-matrix
+  stage: build packages
+  before_script:
+    - python -m pip install --upgrade pip
+    - pip install --upgrade virtualenv poetry poetry-plugin-mono-repo-deps
+    - *pyenv-prep-root
+    - poetry run scripts/create_local_version.sh
+    - *pyenv-prep-pkg
+  script:
+    - poetry build
+  artifacts:
+    paths:
+      - "$PKG/dist"
+
+build image:
+  <<: *services-matrix
+  image: docker:20.10.21
+  stage: build containers
+  services:
+    - docker:20.10.21-dind
+  dependencies:
+    - build all
+  before_script:
+    - ls -altr
+    - cd $PKG
+    - ls -altr
+    - ls info/
+    - ls dist/
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker build -t $IMAGE_SHA .
+    - docker push $IMAGE_SHA
+
+publish to gitlab:
+  stage: release
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v\d+.*$/'
+  dependencies:
+    - build all
+  before_script:
+    - pip install --upgrade twine
+  script:
+    - TWINE_PASSWORD=${CI_JOB_TOKEN} TWINE_USERNAME=gitlab-ci-token python -m twine upload --repository-url https://gitlab.com/api/v4/projects/${CI_PROJECT_ID}/packages/pypi dist/*
+
+release to gitlab:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v\d+.*$/'
+  script:
+    - echo 'running release_job'
+  release:
+    name: "Release $CI_COMMIT_TAG"
+    description: CHANGELOG.md
+    tag_name: "$CI_COMMIT_TAG"
+    ref: "$CI_COMMIT_TAG"
+
+bump version:
+  stage: bump
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - when: manual
+      allow_failure: true
+  before_script:
+    - pip3 install --upgrade Commitizen
+  script:
+    - git remote -v
+    - git status
+    - git remote add api-origin https://oauth2:${CI_TOKEN}@gitlab.com/${CI_PROJECT_PATH} || git remote set-url api-origin https://oauth2:${CI_TOKEN}@gitlab.com/${CI_PROJECT_PATH}
+    - git config user.email "${CI_EMAIL}"
+    - git config user.name "${CI_USERNAME}"
+    - git remote -v
+    - 'exists=`git show-ref refs/heads/${CI_COMMIT_BRANCH}` && if [ -n "$exists" ]; then git branch -D ${CI_COMMIT_BRANCH}; fi'
+    - git checkout -b $CI_COMMIT_BRANCH # as we are on detached head
+    - ls -altr .git/hooks || echo "no old hooks here"
+    - rm -f .git/hooks/pre-commit
+    # in case a previous bump failed, can have the next tag already locally, but not yet pushed.
+    # thus removing all local tags not on the remote in 2 steps:
+    - git tag -l | xargs git tag -d
+    - git fetch --tags
+    # recently cz bump raises nonzero exit if there's nothing to do
+    - cz bump --retry || echo "probably nothing to do" # executes auto bump and git tag
+    - TAG=$(git tag --points-at HEAD)
+    - |
+      if [[ $TAG ]]; then
+        echo "Version bumped";
+      else
+        echo "Version NOT bumped";
+        exit 0;
+      fi
+    - git log -2
+    - git push api-origin $CI_COMMIT_REF_NAME
+    - git push api-origin $TAG
