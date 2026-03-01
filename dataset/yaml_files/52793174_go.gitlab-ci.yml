@@ -1,0 +1,95 @@
+include:
+  - component: $CI_SERVER_FQDN/$CI_PROJECT_PATH/format@$CI_COMMIT_SHA
+    inputs:
+      go_image: $GOLANG_IMAGE
+      job_name: format
+  - component: $CI_SERVER_FQDN/$CI_PROJECT_PATH/build@$CI_COMMIT_SHA
+    inputs:
+      go_image: $GOLANG_IMAGE
+      job_name: build
+  - component: $CI_SERVER_FQDN/$CI_PROJECT_PATH/test@$CI_COMMIT_SHA
+    inputs:
+      go_image: $GOLANG_IMAGE
+      job_name: test
+  - component: $CI_SERVER_FQDN/$CI_PROJECT_PATH/full-pipeline@$CI_COMMIT_SHA
+    inputs:
+      go_image: $GOLANG_IMAGE
+      job_name_prefix: testPrefix-
+      format_job_name: testFormat
+      test_job_name: testTest
+      build_job_name: testBuild
+      format_stage: full
+      test_stage: full
+      build_stage: full
+      format_rules:
+        - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      test_rules:
+        - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      build_rules:
+        - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  - component: $CI_SERVER_FQDN/components/toolkit/license-check@41a4b7da
+    inputs:
+      stage: verify
+  - component: $CI_SERVER_FQDN/components/toolkit/readme-check@41a4b7da
+    inputs:
+      stage: verify
+  - component: $CI_SERVER_FQDN/components/toolkit/ensure-job-added@41a4b7da
+    inputs:
+      stage: verify
+      job_name: format
+  - component: $CI_SERVER_FQDN/components/toolkit/ensure-job-added@41a4b7da
+    inputs:
+      stage: verify
+      job_name: build
+  - component: $CI_SERVER_FQDN/components/toolkit/ensure-job-added@41a4b7da
+    inputs:
+      stage: verify
+      job_name: test
+
+stages:
+  # Component specific stages
+  - format
+  - build
+  - test
+  - verify
+  - full
+  # Needed for CI/CD component release
+  - release
+
+.go-images:
+  parallel:
+    matrix:
+      - GOLANG_IMAGE:
+          - golang:1.22
+          - golang:1.21
+
+# Keep the job names in sync with `job_name` inputs above.
+format:
+  parallel: !reference [.go-images, parallel]
+
+build:
+  parallel: !reference [.go-images, parallel]
+
+test:
+  parallel: !reference [.go-images, parallel]
+
+testPrefix-testFormat:
+  parallel: !reference [.go-images, parallel]
+
+testPrefix-testTest:
+  parallel: !reference [.go-images, parallel]
+
+testPrefix-testBuild:
+  parallel: !reference [.go-images, parallel]
+
+# If we are tagging a release with a semantic version and all previous checks succeeded,
+# we proceed with creating a release automatically.
+create-release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  rules:
+    - if: $CI_COMMIT_TAG =~ /\d+/
+  script: echo "Creating release $CI_COMMIT_TAG"
+  release:
+    tag_name: $CI_COMMIT_TAG
+    description: "Release $CI_COMMIT_TAG of components repository $CI_PROJECT_PATH"

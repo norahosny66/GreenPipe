@@ -1,0 +1,15 @@
+include:
+    - component: $CI_SERVER_FQDN/ysb33rOrg/org/gitlab-pipeline-recipes/pipeline-publish-artifacts-and-docs@0.8.1
+      inputs:
+          jdk: 21
+          integration_tests: always
+          with_offline_repository: always
+    - component: $CI_SERVER_FQDN/ysb33rOrg/org/gitlab-pipeline-recipes/gradleTest@0.8.1
+      inputs:
+          versions: 7.4.2,7.6.4
+    - component: $CI_SERVER_FQDN/ysb33rOrg/org/gitlab-pipeline-recipes/gradleTest@0.8.1
+      inputs:
+          versions: 8.0.2,8.14.3
+    - component: $CI_SERVER_FQDN/ysb33rOrg/org/gitlab-pipeline-recipes/gradleOnWindows@0.8.1
+      inputs:
+          gradle_params: syncRemoteRepositories test integrationTest

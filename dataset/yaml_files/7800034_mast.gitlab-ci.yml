@@ -1,0 +1,81 @@
+variables:
+  DOCFX_SOURCE_BRANCH_NAME: $CI_BUILD_REF_NAME  
+
+stages:
+  - build
+  - release
+
+
+build_lib_test:
+  stage: build
+  image: mcr.microsoft.com/dotnet/core/sdk:3.1-buster
+  script:
+    - ./build.sh
+  tags:
+    - docker
+  except:
+    - tags
+
+build_lib_release:
+  stage: build
+  image: mcr.microsoft.com/dotnet/core/sdk:3.1-buster
+  script:
+    - export BUILD_VERSION=$(echo $CI_COMMIT_REF_NAME | sed  's/\([0-9]\+\.[0-9]\+\.[0-9]\+\)\-release$/\1/g')
+    - echo $BUILD_VERSION
+    - sed -i -e "s/0.5.1.0/$BUILD_VERSION.0/g" build/Rayark.Mast.csproj
+    - ./build.sh
+  artifacts:
+    expire_in: 5 yrs
+    name: mast-unity-project
+    paths:
+      - pack
+  tags:
+    - docker
+  only:
+    - /^.*-release$/
+
+mast-release:
+  stage: release
+  image: bash
+  script:
+    - cp pack/Assets/Plugins/Rayark/Mast/Rayark.Mast.dll .
+  artifacts:
+    expire_in: 5 yrs
+    paths:
+      - Rayark.Mast.dll
+  dependencies:
+    - build_lib_release
+  tags:
+    - docker
+  only:
+    - /^.*-release$/
+
+document:
+  stage: build
+  image: alvinsay/docfx:2.32.1
+  script:
+    - docfx doc/docfx.json
+    - mv doc/_site public
+  artifacts:
+    expire_in: 5 yrs
+    paths:
+      - public                       # Upload the directory
+  tags:
+    - docker
+  only:
+    - /^.*-release$/
+
+
+pages:
+  stage: release
+  image: alvinsay/docfx:2.32.1
+  script:
+    - docfx doc/docfx.json
+    - mv doc/_site public
+  artifacts:
+    paths:
+      - public                       # Upload the directory
+  tags:
+    - docker
+  only:
+    - master

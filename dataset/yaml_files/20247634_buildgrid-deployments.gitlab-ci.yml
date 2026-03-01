@@ -1,0 +1,12 @@
+image: docker:stable
+
+services:
+  - docker:dind
+
+stages:
+  - test
+
+lint:
+  stage: test
+  script:
+    - docker run -v `pwd`/kubernetes:/kubernetes garethr/kubeval -d kubernetes

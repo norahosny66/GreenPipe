@@ -1,0 +1,34 @@
+include:
+  - project: 'devops-heroes1/templates/base-template'
+    file: '/templates/base.template.yml'
+
+cache:
+  paths:
+    - ./bin
+    - ./obj
+
+stages:
+  - prepare
+  - build
+  - test
+  - package
+  - release
+
+build:
+  image: mcr.microsoft.com/dotnet/sdk:9.0
+  stage: build
+  script:
+    - dotnet restore
+    - dotnet build --no-restore
+
+test:
+  image: mcr.microsoft.com/dotnet/sdk:9.0
+  stage: test
+  script:
+    - dotnet test --no-build --no-restore
+
+package:
+  image: mcr.microsoft.com/dotnet/sdk:9.0
+  stage: package
+  script:
+    - dotnet publish --configuration Release --output out

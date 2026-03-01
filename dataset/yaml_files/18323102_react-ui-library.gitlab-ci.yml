@@ -1,0 +1,158 @@
+default:
+  tags:
+    - oliasoft
+    - kubernetes
+
+.node_pnpm:
+  image: oliasoftacr.azurecr.io/cache/node:22.19.0-bookworm
+  before_script:
+    - corepack enable
+    - corepack prepare --activate
+    - pnpm -v
+    - pnpm install --frozen-lockfile
+
+variables:
+  # This repo _relies_ on the full git history for unit tests (the tests cover a git search feature)
+  # Therefore no shallow clone in pipelines, see https://docs.gitlab.com/ee/ci/pipelines/settings.html#limit-the-number-of-changes-fetched-during-clone
+  GIT_DEPTH: 0
+
+stages:
+  - test
+  - beta_release
+  - release
+
+.prepare:
+  extends: .node_pnpm
+  before_script:
+    # Build the package dist
+    - !reference [.node_pnpm, before_script]
+    - pnpm run build:package
+    # Get the version from package.json
+    - VERSION=$(node -p "require('./package.json').version")
+    # Configure NPM
+    - echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > .npmrc
+    # Configure git
+    - mkdir -p ~/.ssh
+    - echo "$SSH_PRIVATE_KEY_TOOLKIT" > ~/.ssh/id_rsa
+    - chmod 0600 ~/.ssh/id_rsa
+    - echo "StrictHostKeyChecking no " > /root/.ssh/config
+    - git config --global http.sslVerify false
+    - git config --global user.email "$GITLAB_USER_EMAIL"
+    - git config --global user.name "🤖 GitLab CI/CD"
+    - echo "setting origin remote to 'git@$CI_SERVER_HOST:$CI_PROJECT_PATH.git'"
+    - git remote rm origin || true
+    - git remote add origin git@$CI_SERVER_HOST:$CI_PROJECT_PATH.git
+    - git fetch --tags --quiet
+    - git checkout "$CI_COMMIT_REF_NAME"
+
+test:
+  stage: test
+  extends: .node_pnpm
+  only:
+    - merge_requests
+  script:
+    - |
+      if [[ "$CI_MERGE_REQUEST_LABELS" =~ "Skip tests" ]]; then
+        echo "Skipping tests as 'Skip tests' label is present."
+        exit 0
+      fi
+    - pnpm run build
+    - pnpm run test
+
+test_storybook:
+  stage: test
+  extends: .node_pnpm
+  only:
+    - merge_requests
+  script:
+    - |
+      if [[ "$CI_MERGE_REQUEST_LABELS" =~ "Skip tests" ]]; then
+        echo "Skipping tests as 'Skip tests' label is present."
+        exit 0
+      fi
+    - pnpm exec playwright install --with-deps
+    - pnpm run build:package
+    - pnpm run build:storybook --quiet
+    - nohup pnpm run dev:storybook & # Start Storybook server in the background
+    - pnpm exec wait-on tcp:127.0.0.1:6006 http://localhost:6006 # Wait for Storybook server to be ready https://github.com/storybookjs/test-runner/issues/301
+    - pnpm run test:storybook --maxWorkers=2 --url http://localhost:6006 # Run tests against the running Storybook instance
+
+cache:
+  paths:
+    - node_modules/
+    - public/
+
+# Publish the static docs site (including Storybook) to Gitlab pages upon merge to master
+pages:
+  stage: release
+  only:
+    - master
+  extends: .node_pnpm
+  script:
+    - pnpm run build
+    - cp public/index.html public/404.html
+  artifacts:
+    paths:
+      - public
+
+beta_release:
+  stage: beta_release
+  extends: .prepare
+  rules:
+    - if: $CI_MERGE_REQUEST_ID && ($CI_MERGE_REQUEST_LABELS =~ /Beta\b/i || $CI_MERGE_REQUEST_TITLE =~ /\[Beta\]/i)
+      when: always
+      allow_failure: true
+    - if: $CI_MERGE_REQUEST_ID
+      when: manual
+      allow_failure: true
+  script:
+    - CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+    - LAST_BETA_TAG=$(git tag --list --sort=-v:refname $VERSION"-beta-*" | head -n 1) # https://stackoverflow.com/a/3867731
+    - LAST_BETA_COUNT=${LAST_BETA_TAG#*\-beta\-} # https://stackoverflow.com/a/4170409
+    - NEXT_BETA_COUNT=$((LAST_BETA_COUNT + 1)) # https://askubuntu.com/a/385531
+    - NEXT_BETA_TAG=$VERSION-beta-$NEXT_BETA_COUNT
+    # Only complete pipeline if current version does not already exist
+    - >
+      if [ $(git tag -l "$VERSION") ]; then
+        echo "Version $VERSION already exists, bump version to release beta"
+        exit 1
+      else
+        echo "Tagging release in git"
+        pnpm version --new-version $NEXT_BETA_TAG --no-git-tag-version
+        git add package.json
+        git commit -m "Release $NEXT_BETA_TAG"
+        git tag $NEXT_BETA_TAG -m "🤖 Tagged by Gitlab CI/CD Pipeline" -m "Branch: $CURRENT_BRANCH" -m "For further reference see $CI_PIPELINE_URL" -m "[skip ci]"
+        echo "Pushing tag to remote repository"
+        git push origin $NEXT_BETA_TAG --no-verify
+        echo "Publishing package to NPM registry"
+        pnpm publish --no-git-checks --tag beta --access public
+      fi
+
+# Push a tag and publish the release to the public NPM registry upon merge to master
+# Loosely inspired by:
+# - https://markswanderingthoughts.nl/tagging-in-gitlab-ci-pipeline-using-deploy-keys/
+# - https://www.garybell.co.uk/creating-a-release-with-gitlab-ci-and-composer/
+publish:
+  stage: release
+  only:
+    - master
+  extends: .prepare
+  script:
+    # Prepare MatterMost message
+    - MESSAGE="🤖 React UI Library version $VERSION released ([release notes](https://gitlab.com/oliasoft-open-source/react-ui-library/-/blob/master/release-notes.md))"
+    - chmod +x ./scripts/send-mattermost-message.sh
+    # Only complete pipeline if version does not already exist
+    - >
+      if [ $(git tag -l "$VERSION") ]; then
+        echo "Version $VERSION already exists"
+        exit 1
+      else
+        echo "Tagging release in git"
+        git tag $VERSION -m "🤖 Tagged by Gitlab CI/CD Pipeline" -m "For further reference see $CI_PIPELINE_URL" -m "[skip ci]"
+        echo "Pushing tag to remote repository"
+        git push origin $VERSION --no-verify
+        echo "Publishing package to NPM registry"
+        pnpm publish --no-git-checks --access public
+        echo "Notifying MatterMost"
+        ./scripts/send-mattermost-message.sh "$MATTERMOST_BOT_KEY" "$MESSAGE"
+      fi

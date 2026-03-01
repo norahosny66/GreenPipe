@@ -1,0 +1,74 @@
+stages:
+  - build
+  - test
+  - release
+  - deploy
+
+npm:
+  stage: build
+  image: node:10-alpine
+  before_script:
+    - apk add --no-cache --update make gcc g++ libc-dev libpng-dev automake autoconf libtool
+  script:
+    - cd laravel/
+    - '[ -f package-lock.json ] && rm package-lock.json'
+    - npm install
+    - npm run prod
+  cache:
+    key: cache-node
+    paths:
+      - laravel/node_modules/
+      - laravel/public/
+  only:
+    - master
+composer:
+  stage: build
+  image: composer
+  before_script:
+    - apk add curl --update
+  script:
+    - cd laravel/
+    - '[ -f .env ] && rm .env'
+    - '[ -f composer.lock ] && rm composer.lock'
+    - 'curl "https://gitlab.com/twin-opensource/laravel-nginx-phpfpm-k8s/snippets/1784556/raw" >> .env'
+    - composer install
+  cache:
+    key: cache-composer-vendor
+    paths:
+      - laravel/vendor/
+      - laravel/.env
+  only:
+    - master
+release-nginx:
+  stage: release
+  image: docker:latest
+  services:
+    - docker:dind
+  cache:
+    key: cache-node
+    paths:
+      - laravel/public/
+    policy: pull
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker build --pull -t $CI_REGISTRY_IMAGE:nginx -f Dockerfile-nginx .
+    - docker push $CI_REGISTRY_IMAGE:nginx
+  only:
+    - master
+release-phpfpm:
+  stage: release
+  image: docker:latest
+  services:
+    - docker:dind
+  cache:
+    key: cache-composer-vendor
+    paths:
+      - laravel/vendor/
+      - laravel/.env
+    policy: pull
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker build --pull -t $CI_REGISTRY_IMAGE:php -f Dockerfile-php .
+    - docker push $CI_REGISTRY_IMAGE:php
+  only:
+    - master

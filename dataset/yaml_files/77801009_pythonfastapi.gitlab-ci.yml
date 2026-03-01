@@ -1,0 +1,50 @@
+# stages:
+#   - package
+#   - deploy
+
+# variables:
+#   DOCKER_HOST: tcp://docker:2375
+#   DOCKER_TLS_CERTDIR: ""
+#   REMOTE_HOST: 172.17.178.14
+#   REMOTE_USER: root
+#   REMOTE_PASSWORD: IT#@dm1n#
+#   IMAGE_TAG: UATv$CI_COMMIT_SHORT_SHA
+
+# # Job to build and push the Docker image
+# docker-build-push-uat:
+#   stage: package
+#   image: docker:26  # Docker CLI
+#   services:
+#     - name: docker:26-dind  # Docker daemon
+#       command: ["--host=tcp://0.0.0.0:2375", "--tls=false"]
+#   script:
+#     - docker info
+#     - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+#     - docker build -t registry.sovannaphumlife.com/svl_development_team/pythonpdf:$IMAGE_TAG .
+#     - docker push registry.sovannaphumlife.com/svl_development_team/pythonpdf:$IMAGE_TAG
+#   tags:
+#     - fast-api-uat
+#   only:
+#     - main
+
+# # ---------- DEPLOY ----------
+# deploy-uat:
+#   stage: deploy
+#   image: alpine:latest
+#   before_script:
+#     - apk add --no-cache openssh-client sshpass
+#   script:
+#     - |
+#       echo "$REMOTE_PASSWORD" | sshpass ssh -o StrictHostKeyChecking=no $REMOTE_USER@$REMOTE_HOST '
+#         docker container rm -f fastapi-pdf || true
+#         docker run -itd \
+#           --name fastapi-pdf \
+#           --restart always \
+#           --network web_server \
+#           --volume labeled:/home/labeled/ \
+#           '"registry.sovannaphumlife.com/svl_development_team/pythonpdf:UATv$IMAGE_TAG"'
+#       '
+#   tags:
+#     - fast-api-uat
+#   only:
+#     - main

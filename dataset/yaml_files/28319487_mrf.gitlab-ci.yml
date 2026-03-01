@@ -1,0 +1,445 @@
+stages:
+  - check_format
+  - build
+  - test
+  - deploy
+
+format:
+  stage: check_format
+  only:
+    - master
+    - merge_request
+  script:
+    - mkdir build_format
+    - cd build_format
+    - cmake ..
+    - make clang-format
+    - clang-format --version
+    - git diff > format.patch
+    - if [ -s format.patch ]; then exit 1; else echo "Format is compliant with MRF rules"; fi
+  artifacts:
+    when: on_failure
+    expire_in: 1 day
+    paths:
+      - build_format/format.patch
+  tags:
+    - ubuntu2004
+
+# ----------------------------------------------------------------------------
+# Build MRF
+# ----------------------------------------------------------------------------
+
+# build_ubuntu_16_04_gcc:
+#   stage: build
+#   only:
+#     - master
+#     - merge_request
+#   script:
+#     - mkdir build
+#     - cd build
+#     - cmake ..
+#       -DENABLE_TEST=YES
+#       -DCMAKE_C_COMPILER=gcc
+#       -DCMAKE_CXX_COMPILER=g++
+#     - make
+#   artifacts:
+#     expire_in: 1 day
+#     paths:
+#       - build
+#   tags:
+#     - ubuntu 16.04.3 amd64
+
+
+build_ubuntu_18_04_gcc:
+  stage: build
+  only:
+    - master
+    - merge_request
+  script:
+    - mkdir build
+    - cd build
+    - cmake ..
+      -DENABLE_TEST=YES
+      -DCMAKE_C_COMPILER=gcc
+      -DCMAKE_CXX_COMPILER=g++
+    - make
+  artifacts:
+    expire_in: 1 day
+    paths:
+      - build
+  tags:
+    - ubuntu1804
+
+
+build_ubuntu_20_04_gcc:
+  stage: build
+  only:
+    - master
+    - merge_request
+  script:
+    - mkdir build
+    - cd build
+    - cmake ..
+      -DENABLE_TEST=YES
+      -DCMAKE_C_COMPILER=gcc
+      -DCMAKE_CXX_COMPILER=g++
+    - make
+  artifacts:
+    expire_in: 1 day
+    paths:
+    - build
+  tags:
+    - ubuntu2004
+
+
+build_ubuntu_20_04_clang:
+  stage: build
+  only:
+    - master
+    - merge_request
+  script:
+    - mkdir build
+    - cd build
+    - cmake ..
+      -DENABLE_TEST=YES
+      -DCMAKE_C_COMPILER=clang
+      -DCMAKE_CXX_COMPILER=clang++
+    - make
+  artifacts:
+    expire_in: 1 day
+    paths:
+    - build
+  tags:
+    - ubuntu2004
+
+
+build_win10_vs2017:
+  stage: build
+  only:
+    - master
+    - merge_request
+  script:
+    - C:\Windows\system32\cmd.exe /k "C:\Program Files (x86)\Microsoft Visual Studio\2017\Community\VC\Auxiliary\Build\vcvars64.bat"
+    - mkdir build
+    - cd build
+    - cmake ..
+      -G "Visual Studio 15 2017 Win64"
+      -DENABLE_TEST=YES
+      -DBUILD_SHARED_LIBS=ON
+    - cmake --build . --config Debug
+  artifacts:
+    expire_in: 1 day
+    paths:
+      - build
+  tags:
+    - win10
+
+
+build_win10_vs2019:
+  stage: build
+  only:
+    - master
+    - merge_request
+  script:
+    - C:\Windows\system32\cmd.exe /k "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat"
+    - mkdir build
+    - cd build
+    - cmake .. -G "Visual Studio 16 2019" -A x64
+      -DENABLE_TEST=YES
+      -DBUILD_SHARED_LIBS=ON
+    - cmake --build . --config Debug
+  artifacts:
+    expire_in: 1 day
+    paths:
+      - build
+  tags:
+    - win10
+
+
+build_macos:
+  stage: build
+  only:
+    - master
+    - merge_request
+  script:
+    - mkdir build
+    - cd build
+    - cmake ..
+      -DENABLE_TEST=YES
+    - make
+  artifacts:
+    expire_in: 1 day
+    paths:
+      - build
+  tags:
+    - macos
+
+# ----------------------------------------------------------------------------
+# Test MRF
+# ----------------------------------------------------------------------------
+
+# test_ubuntu_16_04:
+#   stage: test
+#   needs: ["build_ubuntu_16_04_gcc"]
+#   only:
+#     - merge_request
+#     - master
+#   script:
+#     - cd build
+#     - (ctest -T Test || true)
+#     - (xsltproc ../unit_tests/CTest2JUnit.xsl Testing/`head -n 1 < Testing/TAG`/Test.xml > "JUnitTestResults_$CI_JOB_ID.xml" || true)
+#   artifacts:
+#     reports:
+#       junit:
+#         - "build/JUnitTestResults_$CI_JOB_ID.xml"
+#     paths:
+#       - "build/JUnitTestResults_$CI_JOB_ID.xml"
+#     expire_in: 1 day
+#   tags:
+#     - ubuntu 16.04.3 amd64
+
+
+test_ubuntu_18_04:
+  stage: test
+  needs: ["build_ubuntu_18_04_gcc"]
+  only:
+    - merge_request
+    - master
+  script:
+    - cd build
+    - (ctest -T Test || true)
+    - (xsltproc ../unit_tests/CTest2JUnit.xsl Testing/`head -n 1 < Testing/TAG`/Test.xml > "JUnitTestResults_$CI_JOB_ID.xml" || true)
+  artifacts:
+    reports:
+      junit:
+        - "build/JUnitTestResults_$CI_JOB_ID.xml"
+    paths:
+      - "build/JUnitTestResults_$CI_JOB_ID.xml"
+    expire_in: 1 week
+  tags:
+    - ubuntu1804
+
+
+test_coverage_ubuntu_20_04:
+  stage: test
+  needs: ["build_ubuntu_20_04_gcc"]
+  only:
+    - merge_request
+    - master
+  script:
+    - cd build
+    - mkdir  -p ../doc/coverage_report/mrf/
+    - ctest
+    - gcovr -r ../libmrf/ . -b --exclude '(.+/)?externals.*$' -exclude-unreachable-branch -exclude-throw-branches
+    - gcovr -r ../libmrf/ . -b --html-details -o cov_report.html --html-title MRF --exclude '(.+/)?externals.*$' -exclude-unreachable-branch -exclude-throw-branches
+#    - gcovr -r ../libmrf/ . -b --html-details -o cov_report.html --html-title MRF --exclude '(.+/)?externals.*$' -exclude-unreachable-branch -exclude-throw-branches --exclude-lines-by-pattern '.*assert.*'
+    - mv *.html ../doc/coverage_report/mrf/
+# APPS Coverage Report
+    - mkdir  -p ../doc/coverage_report/apps/
+    - gcovr --version
+    - gcovr -r ../apps/ . -b --exclude '(.+/)?externals.*$' -exclude-unreachable-branch -exclude-throw-branches
+    - gcovr -r ../apps/ . -b --html-details -o cov_report.html --html-title MRF --exclude '(.+/)?externals.*$' -exclude-unreachable-branch -exclude-throw-branches 
+    - mv *.html ../doc/coverage_report/apps/
+  artifacts:
+    paths:
+      - doc/coverage_report
+      - doc/coverage_report/mrf/
+      - doc/coverage_report/mrf/cov_report.html
+      - doc/coverage_report/apps/
+      - doc/coverage_report/apps/cov_report.html
+    expire_in: 6 month
+  tags:
+    - ubuntu2004
+
+
+test_win10:
+  stage: test
+  needs: ["build_win10_vs2019"]
+  only:
+    - master
+    - merge_request
+  script:
+    - cd build
+    - ctest --progress -C Debug
+    - cd ..
+  artifacts:
+    when: on_failure
+    expire_in: 1 week
+    paths:
+      - build/
+  tags:
+    - win10
+
+
+test_macos:
+  stage: test
+  needs: ["build_macos"]
+  only:
+    - merge_request
+    - master
+  script:
+    - cd build
+    - ctest
+  artifacts:
+    when: on_failure
+    expire_in: 1 week
+    paths:
+      - build/
+  tags:
+    - macos
+
+
+# ----------------------------------------------------------------------------
+# Deploy
+# ----------------------------------------------------------------------------
+
+malia_ubuntu_18_04:
+  stage: deploy
+  only:
+    - master
+    - merge_request
+  needs: ["format"]
+  script:
+    - mkdir build
+    - cd build
+    - cmake ..
+      -DCMAKE_BUILD_TYPE=Release
+      -DRENDERER_INTERACTIVE=ON
+      -DOptiX_INSTALL_DIR=/builds/NVIDIA-OptiX-SDK-6.5.0-linux64/
+      -DCMAKE_INSTALL_PREFIX=./install
+    - make install
+    - make blender-bridge
+    - cpack
+    - cp ../deploy/make_appimage_bundle.sh install/bin
+    - cp ../deploy/icon.png                install/bin
+    - cp ../deploy/Malia_RGB.desktop       install/bin
+    - cp ../deploy/Malia.desktop           install/bin
+    - cd install/bin
+    - chmod a+x make_appimage_bundle.sh
+    - ./make_appimage_bundle.sh Ubuntu_18_04_Optix_6_5_0
+    - cd ../../..
+    - ls build/install/bin/
+    - mv build/install/bin/malia.AppImage       .
+    - mv build/install/bin/malia_rgb.AppImage   .
+    - mv build/bin/blender_mrf.zip      .
+    - mv build/Malia-1.0.3-Linux.tar.gz .
+  artifacts:
+    expire_in: 70 days
+    paths:
+      - malia.AppImage
+      - malia_rgb.AppImage
+      - blender_mrf.zip
+      - Malia-1.0.3-Linux.tar.gz
+  tags:
+    - ubuntu1804
+
+malia_win10:
+  stage: deploy
+  only:
+    - master
+    - merge_request
+  needs: ["format"]
+  script:
+    - C:\Windows\system32\cmd.exe /k "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat"
+    - mkdir build
+    - cd build
+    - mkdir install
+    - cmake ..
+      -G "Visual Studio 16 2019" -A x64
+      -DCMAKE_BUILD_TYPE=Release
+      -DBUILD_SHARED_LIBS=ON
+      -DBUILD_INSTALLER=ON
+      -DRENDERER_INTERACTIVE=ON
+      -DOptiX_INSTALL_DIR="C:/ProgramData/NVIDIA Corporation/OptiX SDK 6.5.0/"
+      -DCUDA_TOOLKIT_ROOT_DIR="C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v10.2" ..
+      -DEigen3_DIR="C:\Program Files (x86)\Eigen3\share\eigen3\cmake"
+      -DCMAKE_INSTALL_PREFIX=install
+    - cmake --build . --config Release
+    - cmake --install . --prefix install
+    - cmake .. -DCMAKE_INSTALL_PREFIX=install
+    - cmake --build . -t blender-bridge --prefix install --config Release
+    - cpack
+    - mv Malia-1.0.3-win64.exe ..
+    - mv Malia-1.0.3-win64.7z ..
+    - mv bin/blender_mrf.zip ..
+  artifacts:
+    expire_in: 70 days
+    paths:
+     - blender_mrf.zip
+     - Malia-1.0.3-win64.7z
+  tags:
+    - win10
+
+
+# malia_win10:
+#   stage: deploy
+#   only:
+#     - master
+#     - merge_request
+#   script:
+#     - C:\Windows\system32\cmd.exe /k "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat"
+#     - mkdir build
+#     - cd build/
+#     - cmake -G "Visual Studio 16 2019" -A x64 -DCMAKE_BUILD_TYPE=Release ..
+#     - cmake --build . --target install
+#     - cd ..
+#     - cd apps/malia/
+#     - mkdir build
+#     - cd build
+#     - cmake -G "Visual Studio 16 2019" -A x64 -DMALIA_GPU_ARCHITECTURE=MAXWELL -DMALIA_DEPLOY_MODE_ENABLED=ON -DCMAKE_BUILD_TYPE=Release -DRENDERER_INTERACTIVE=ON -DOptiX_INSTALL_DIR="C:/ProgramData/NVIDIA Corporation/OptiX SDK 6.5.0/" -DCUDA_TOOLKIT_ROOT_DIR="C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v10.2" ..
+#     - cmake --build . --config Release
+#     - cd ..
+#     - cpack -G 7Z --config build/CPackConfig.cmake
+#     - copy ..\..\blender_bridge\make_blender_zip.bat .
+#     - dir
+#     - .\make_blender_zip.bat Malia-1.0.0_beta-Windows_Optix_6.5.0.7z
+#     - mv Malia-1.0.0_beta-Windows_Optix_6.5.0.7z ../../
+#     # - rmdir -R build
+#     # - mkdir build
+#     # - cd build
+#     # - cmake -G "Visual Studio 16 2019" -A x64 -DMALIA_GPU_ARCHITECTURE=KEPLER -DMALIA_DEPLOY_MODE_ENABLED=ON -DCMAKE_BUILD_TYPE=Release -DRENDERER_INTERACTIVE=ON -DOptiX_INSTALL_DIR="C:/ProgramData/NVIDIA Corporation/OptiX SDK 5.1.1/" -DCUDA_TOOLKIT_ROOT_DIR="C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v10.2" ..
+#     # - cmake --build . --config Release
+#     # - cd ..
+#     # - cpack -G 7Z --config build/CPackConfig.cmake
+#     # - copy ..\..\blender_bridge\make_blender_zip.bat .
+#     # - .\make_blender_zip.bat Malia-1.0.0_beta-Windows_Optix_51.7z
+#     # - mv Malia-1.0.0_beta-Windows_Optix*.7z ../../
+#     # - rmdir -R build
+#     # - mkdir build
+#     # - cd build
+#     # - cmake -G "Visual Studio 16 2019" -A x64 -DMALIA_GPU_ARCHITECTURE=MAXWELL -DMALIA_DEPLOY_MODE_ENABLED=ON -DCMAKE_BUILD_TYPE=Release -DRENDERER_INTERACTIVE=ON -DOptiX_INSTALL_DIR="C:/ProgramData/NVIDIA Corporation/OptiX SDK 6.0.0/" -DCUDA_TOOLKIT_ROOT_DIR="C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v10.2" ..
+#     # - cmake --build . --config Release
+#     # - cd ..
+#     # - cpack -G 7Z --config build/CPackConfig.cmake
+#     # - copy ..\..\blender_bridge\make_blender_zip.bat .
+#     # - .\make_blender_zip.bat Malia-1.0.0_beta-Windows_Optix_6.0.0.7z
+#     # - mv Malia-1.0.0_beta-Windows_Optix_6.0.0.7z ../../
+#   # Independent Build for now
+#   needs: []
+#   artifacts:
+#     expire_in : 10 days
+#     paths:
+#       # - Malia-1.0.0_beta-Windows_Optix_51.7z
+#       # - Malia-1.0.0_beta-Windows_Optix_6.0.0.7z
+#       - Malia-1.0.0_beta-Windows_Optix_6.5.0.7z
+#   tags:
+#     - BIGWin10
+
+
+# # test_deploy_win10:
+# #   stage: test_deploy
+# #   only:
+# #     - merge_request
+# #   needs: ["malia_win10"]
+# #   script:
+# #     - pwd
+# #     - ls
+# #     - 7z x Malia-1.0.0_beta-Windows_Optix_6.5.0.7z
+# #     - cd Malia-1.0.0_beta-Windows_Optix_6.5.0/
+# #     - ./malia.exe -h
+# #   artifacts:
+# #     expire_in : 2 days
+# #     paths:
+# #       - Malia-1.0.0_beta-Windows_Optix_6.5.0/
+# #   tags:
+# #     - deploy-win10

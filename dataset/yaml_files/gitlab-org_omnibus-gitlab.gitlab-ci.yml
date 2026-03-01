@@ -1,0 +1,230 @@
+spec:
+  inputs:
+    skip_qa_test:
+      type: boolean
+      default: false
+      description: "If true, skips running QA tests for the current pipeline."
+
+---
+
+stages:
+  - check
+  - prepare
+  - tests
+  - post-test
+  - update-cache
+  - package
+  - image
+  - scan-dependencies
+  - staging_upload
+  - pulp_staging_upload
+  - staging_verify
+  - package-and-image-release
+  - pulp-package-release
+  - qa-release
+  - validate
+  - metrics
+  - aws-marketplace-release
+  - notification_fail
+  - qa
+  - verify
+
+.vault-integration:
+  # Base template for jobs that need to retrieve secrets from Vault
+  id_tokens:
+    VAULT_ID_TOKEN:
+      aud: https://vault.gitlab.net
+
+include:
+  - local: '/gitlab-ci-config/workflow-rules.yml'
+  - local: '/gitlab-ci-config/variables.yml'
+  - local: '/gitlab-ci-config/rat.yml'
+  - local: '/gitlab-ci-config/dev-gitlab-org.yml'
+  - local: '/gitlab-ci-config/dind-config.yml'
+  - local: '/gitlab-ci-config/vault-security-secrets.yml'
+    rules:
+      # doc/build/vault_integration.md
+      - if: '$CI_PROJECT_PATH == $SECURITY_PROJECT_PATH'
+  - local: '/gitlab-ci-config/vault-public-secrets.yml'
+    rules:
+      # doc/build/vault_integration.md
+      - if: '$CI_PROJECT_PATH != $SECURITY_PROJECT_PATH'
+  - local: '/gitlab-ci-config/gitlab-com.yml'
+    rules:
+      - if: '$CI_SERVER_HOST == "gitlab.com"'
+    inputs:
+      skip_qa_test: $[[ inputs.skip_qa_test ]]
+
+default:
+  tags:
+    - gitlab-org
+
+.distribution-amd64-tags:
+  - distribution-runner
+  - amd64
+
+.distribution-arm64-tags:
+  - distribution-runner
+  - ${ARM64_RUNNER_TAG}
+
+.distribution-armhf-tags:
+  - distribution-runner
+  - armhf
+
+.docker_job:
+  image: "${BUILDER_IMAGE_REGISTRY}/distribution_ci_tools:${BUILDER_IMAGE_REVISION}"
+  extends: .dind
+  tags:
+    - gitlab-org-docker
+
+.gems-cache:
+  cache:
+    key: "gems-cache-${BUILDER_IMAGE_REVISION}${CACHE_KEY_SUFFIX}"
+    paths:
+      - gems
+    policy: pull
+
+.gems-cache-os-dependent:
+  cache:
+    key: "gems-cache-${CI_JOB_IMAGE}${CACHE_KEY_SUFFIX}"
+    paths:
+      - gems
+
+.build-package:
+  - bundle exec rake cache:populate
+  - bundle exec rake cache:restore
+  - bundle exec rake build:project
+  - bundle exec rake build:package:sync
+  - bundle exec rake cache:bundle
+  - bundle exec rake build:component_shas
+
+before_script:
+  - echo "PIPELINE_TYPE detected as ${PIPELINE_TYPE}"
+  # Exit early if building on an OS for which we don't provide the specified
+  # package edition (CE/EE). For child pipelines from
+  # TRIGGERED_(CE|EE)_PIPELINE, we don't want exit early, but try to build
+  # everything.
+  - if [[ "${CI_PIPELINE_SOURCE}" != "parent_pipeline" ]] && [[ "${CI_PIPELINE_SOURCE}" != "pipeline" ]]; then
+      export CE_ONLY=(Raspberry);
+      export EE_ONLY=(SLES RAT);
+      for job in "${CE_ONLY[@]}"; do
+        if [[ "${CI_JOB_NAME}" =~ ${job} ]]; then
+          if ./support/is_gitlab_ee.sh; then
+            echo "EE build found. ${CI_JOB_NAME} is run only on CE builds";
+            exit 0 ;
+          fi;
+        fi;
+      done;
+      for job in "${EE_ONLY[@]}"; do
+        if [[ "${CI_JOB_NAME}" =~ ${job} ]]; then
+          if ! ./support/is_gitlab_ee.sh; then
+            echo "CE build found. ${CI_JOB_NAME} is run only on EE builds";
+            exit 0 ;
+          fi;
+        fi;
+      done
+    fi
+  - echo $NIGHTLY
+  - mkdir -p ~/.ssh
+  - mkdir -p ~/.aws
+  - mkdir -p cache
+  - if [ -n "$DEV_GITLAB_SSH_KEY" ]; then
+      echo "$DEV_GITLAB_SSH_KEY" > ~/.ssh/id_rsa;
+      cp support/known_hosts ~/.ssh/known_hosts;
+      chmod -R 0600 ~/.ssh/;
+    fi
+  - bash scripts/ci/prepare_bundle.sh
+  - if [ -n "$NIGHTLY" ]; then
+      export STAGING_REPO=${NIGHTLY_REPO};
+      export FIPS_STAGING_REPO=${NIGHTLY_FIPS_REPO};
+    fi
+
+fetch-assets:
+  extends:
+    - .docker_job
+    - .with-build-token
+  stage: prepare
+  timeout: 1 hour
+  before_script: []
+  script:
+    - export VERSION=${GITLAB_ASSETS_TAG-${GITLAB_REF_SLUG-$(ruby -I. -e 'require "lib/gitlab/version"; puts Gitlab::Version.new("gitlab-rails").print')}}
+    - support/fetch_assets "${VERSION}"
+  artifacts:
+    paths:
+      - ${ASSET_PATH}
+  rules:
+    - if: '$COMPILE_ASSETS == "true"'
+      when: never
+    # NOTE (rspeicher): Checking `$AUTO_DEPLOY_COMPILE_ASSETS` as a feature flag
+    # See https://gitlab.com/gitlab-org/omnibus-gitlab/-/issues/5805
+    - if: '$AUTO_DEPLOY_COMPILE_ASSETS && $PIPELINE_TYPE =~ /AUTO_DEPLOY_BUILD_PIPELINE$/'
+      when: never
+    # Run on all pipelines including a package build (except auto-deploy tag
+    # covered above)
+    - if: '$PIPELINE_TYPE =~ /_BUILD_PIPELINE$/'
+    - if: '$PIPELINE_TYPE =~ /TRIGGERED_(CE|EE)_PIPELINE/'
+    - if: '$PIPELINE_TYPE == "TRIGGER_CACHE_UPDATE_PIPELINE"'
+    - if: '$PIPELINE_TYPE == "DURATION_PLOTTER_PIPELINE"'
+  retry: 2
+
+generate-facts:
+  extends:
+    - .gems-cache
+    - .with-build-token
+  stage: prepare
+  image: "${BUILDER_IMAGE_REGISTRY}/distribution_ci_tools:${BUILDER_IMAGE_REVISION}"
+  script:
+    - mkdir -p build_facts
+    - bundle exec omnibus manifest gitlab -l nothing > build_facts/version-manifest.json
+    - bundle exec rake build:generate_facts
+  artifacts:
+    paths:
+      - build_facts
+    reports:
+      dotenv: build_facts/env_vars
+  rules:
+    - if: '$PIPELINE_TYPE =~ /_BUILD_PIPELINE$/'
+    - if: '$PIPELINE_TYPE == "TRIGGER_CACHE_UPDATE_PIPELINE"'
+    - if: '$PIPELINE_TYPE =~ /_TEST_PIPELINE$/'
+    - if: '$PIPELINE_TYPE == "GITLAB_MR_PIPELINE"'
+    - if: '$PIPELINE_TYPE =~ /TRIGGERED_(CE|EE)_PIPELINE/'
+    - if: '$PIPELINE_TYPE == "DEPENDENCY_SCANNING_PIPELINE"'
+    - if: '$PIPELINE_TYPE == "FORK_MR_PIPELINE"'
+    - when: never
+  needs: []
+  retry: 2
+
+.notify:
+  before_script:
+    - apk add --no-cache curl
+  image: ${ALPINE_IMAGE}
+  stage: notification_fail
+
+notify:slack-fail:scheduled-master:
+  extends:
+    - .notify
+  script:
+    - ./support/notify_slack.sh "#qa-master" "☠️ Scheduled omnibus-build against master failed! ☠️ See $CI_PIPELINE_URL (triggered from $TOP_UPSTREAM_SOURCE_JOB)"
+  rules:
+    - if: '$TOP_UPSTREAM_SOURCE_JOB == null || $TOP_UPSTREAM_SOURCE_REF != "master"'
+      when: never
+    - if: '$PIPELINE_TYPE == "TRIGGERED_EE_PIPELINE"'
+      when: on_failure
+
+issue-bot:
+  stage: notification_fail
+  image: "${CI_REGISTRY}/${GITLAB_NAMESPACE}/distribution/issue-bot:latest"
+  script: /issue-bot
+  rules:
+    # Not needed in non-protected (feature) branches
+    - if: '$CI_COMMIT_REF_PROTECTED != "true"'
+      when: never
+    # Not needed in omnibus-gitlab-mirror
+    - if: '$CI_PROJECT_PATH == $QA_PROJECT_PATH'
+      when: never
+    # The remaining scenarios are all important pipelines we want to be
+    # notified about
+    # 0. Tags
+    # 1. Master branch - includes scheduled pipelines also
+    # 2. Stable branches
+    - when: on_failure

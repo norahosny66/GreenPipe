@@ -1,0 +1,346 @@
+variables:
+  UCSB_RABBITMQ_USERNAME: surfliner
+  UCSD_RABBITMQ_USERNAME: surfliner
+  UCSD_REVIEW_DOMAIN: 169.228.62.235.nip.io
+  UCSD_STAGING_DOMAIN: 132.239.119.49.nip.io
+
+stages:
+  - maintenance
+  - build
+  - lint
+  - test
+  - integration
+  - review
+  - staging
+  - qa
+  - production
+  - sandbox
+  - reindex
+  - result_notification
+
+include:
+  - local: ci/base.yml
+  - local: ci/comet.yml
+  - local: ci/common.yml
+  - local: ci/daylight_component.yml
+  - local: ci/daylight_registry.yml
+  - local: ci/docs.yml
+  - local: ci/geoserver.yml
+  - local: ci/lark.yml
+  - local: ci/ld_api.yml
+  - local: ci/orange-empire.yml
+  - local: ci/shoreline.yml
+  - local: ci/starlight.yml
+  - local: ci/superskunk.yml
+  - local: ci/surfliner_schema.yml
+  - local: ci/tidewater.yml
+
+# Build with Docker. When building on `trunk`, tag a new stable image.
+.build_helpers: &build_helpers |
+  set -x
+  build_image_for() {
+    if test $# -lt 2 ; then
+        echo "You must specify a project path to a Dockerfile and an image name, an optional target, and an optional context."
+        echo "example: build_image_for 'starlight' 'starlight_web' 'production'"
+        echo "example: build_image_for 'owl' 'owl' 'production' 'owl'"
+      exit 1
+    fi
+    project=$1
+    image_name=$2
+    target=$3
+    context=$4
+
+    context_param="$CI_PROJECT_DIR"
+    if [ "$context" ]; then
+      context_param="$context_param/$context"
+    fi
+
+    sha_tagged_image="$CI_REGISTRY_IMAGE/$image_name:$CI_COMMIT_SHA"
+    stable_tagged_image="$CI_REGISTRY_IMAGE/$image_name:stable"
+
+    # branch names with /, such as renovate/a-dependency-update will fail
+    # turn '/' -> '-'
+    normalized_ref_name="${CI_COMMIT_REF_NAME//\//-}"
+    ref_cache_image="$CI_REGISTRY_IMAGE/$image_name:$normalized_ref_name-cache"
+
+    if [ "$CI_COMMIT_REF_NAME" = "trunk" ]; then
+      echo "Building stable image for trunk branch $sha_tagged_image and $stable_tagged_image..."
+      docker buildx build --push \
+        --debug \
+        -t "$sha_tagged_image" \
+        -t "$stable_tagged_image" \
+        --target "$target" \
+        --file "$CI_PROJECT_DIR/$project/Dockerfile" \
+        --cache-to type=registry,ref="${stable_tagged_image}-cache,mode=max" \
+        --cache-from type=registry,ref="${stable_tagged_image}-cache" \
+        "$context_param"
+    else
+      echo "Building image for $sha_tagged_image..."
+      docker buildx build --push \
+        --debug \
+        -t "$sha_tagged_image" \
+        --file "$CI_PROJECT_DIR/$project/Dockerfile" \
+        --target "$target" \
+        --cache-to type=registry,ref="$ref_cache_image,mode=max" \
+        --cache-from type=registry,ref="$ref_cache_image" \
+        --cache-from type=registry,ref="${stable_tagged_image}-cache" \
+        "$context_param"
+    fi
+  }
+
+
+# container images build template
+.docker-build:
+  stage: build
+  image: ${CI_DEPENDENCY_PROXY_DIRECT_GROUP_IMAGE_PREFIX}/docker:29.2.1
+  services:
+    - name: ${CI_DEPENDENCY_PROXY_DIRECT_GROUP_IMAGE_PREFIX}/docker:29.2.1-dind
+      alias: docker
+      variables:
+        HEALTHCHECK_TCP_PORT: "2376"
+  variables:
+    KUBERNETES_CPU_REQUEST: "1"
+    KUBERNETES_CPU_LIMIT: "1"
+    KUBERNETES_MEMORY_LIMIT: 2Gi
+    KUBERNETES_MEMORY_REQUEST: 2Gi
+    # When you use the dind service, you must instruct Docker to talk with
+    # the daemon started inside of the service. The daemon is available
+    # with a network connection instead of the default
+    # /var/run/docker.sock socket. Docker 19.03 does this automatically
+    # by setting the DOCKER_HOST in
+    # https://github.com/docker-library/docker/blob/d45051476babc297257df490d22cbd806f1b11e4/19.03/docker-entrypoint.sh#L23-L29
+    #
+    # The 'docker' hostname is the alias of the service container as described at
+    # https://docs.gitlab.com/ee/ci/services/#accessing-the-services.
+    #
+    # Specify to Docker where to create the certificates. Docker
+    # creates them automatically on boot, and creates
+    # `/certs/client` to share between the service and job
+    # container, thanks to volume mount from config.toml
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: "/certs"
+    # These are usually specified by the entrypoint, however the
+    # Kubernetes executor doesn't run entrypoints
+    # https://gitlab.com/gitlab-org/gitlab-runner/-/issues/4125
+    DOCKER_TLS_VERIFY: 1
+    DOCKER_CERT_PATH: "$DOCKER_TLS_CERTDIR/client"
+    DOCKER_DRIVER: overlay2
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" --username "$CI_REGISTRY_USER" --password-stdin
+    - echo "$CI_DEPENDENCY_PROXY_PASSWORD" | docker login "$CI_DEPENDENCY_PROXY_SERVER" --username "$CI_DEPENDENCY_PROXY_USER" --password-stdin
+    - echo "$DOCKER_HUB_ORG_TOKEN" | docker login --username "$DOCKER_HUB_USER" --password-stdin
+    - docker info
+    - docker buildx rm surfliner-build || true
+    - docker context create surfliner-build
+    - docker buildx ls
+    - docker buildx create surfliner-build --driver docker-container --use --driver-opt "image=${CI_DEPENDENCY_PROXY_DIRECT_GROUP_IMAGE_PREFIX}/moby/buildkit:buildx-stable-1"
+    - docker buildx inspect
+    - *build_helpers
+  tags:
+    - build
+
+# Default only -> refs settings for all jobs
+# see: https://docs.gitlab.com/ee/ci/yaml/#onlyrefsexceptrefs
+.only-refs-default:
+  only:
+    refs:
+      - trunk
+      - merge_requests
+      - tags
+
+  # Helm 3 deployment helper functions
+.helm3_deploy_helpers: &helm3_deploy_helpers |
+  function deploy() {
+    chart="${1}"
+
+    if [ -d "${chart}" ]; then
+      pushd "$(pwd)"
+      cd "${chart}" || exit 1
+      download_chart_dependencies
+      popd
+    fi
+
+    decode_helm_values_files
+    if helm ls --namespace="$KUBE_NAMESPACE" -q | grep -q "$HELM_RELEASE_NAME"; then
+      echo "Deploying new release: $HELM_RELEASE_NAME..."
+    else
+      first_release="yes"
+      echo "Deploying initial release: $HELM_RELEASE_NAME..."
+    fi
+
+    image_param=""
+    if [ "$DEPLOY_IMAGE" ]; then
+      image_param="--set image.repository=$DEPLOY_IMAGE"
+    fi
+
+    tag_param=""
+    if [ "$DEPLOY_TAG" ]; then
+      tag_param="--set image.tag=$DEPLOY_TAG"
+    fi
+
+    # the bitnami charts respect global.imageRegistry and image.pullSecrets so we can set it once here
+    if [ "$CI_COMMIT_REF_NAME" != "trunk" ]; then
+      configure_gitlab_dependency_proxy="--set global.security.allowInsecureImages=true"
+    fi
+
+    export DEPLOY_DATETIME="$(date -Iminutes)"
+
+    helm_command="
+      helm upgrade \
+          --install \
+          --atomic \
+          --timeout 15m0s \
+          --debug \
+          $configure_gitlab_dependency_proxy \
+          $image_param \
+          $tag_param \
+          $HELM_UPGRADE_FILE_VALUES_ARGS \
+          $(echo ${HELM_UPGRADE_EXTRA_ARGS} | tr -d '\n') \
+          --set deploy.datetime=\"${DEPLOY_DATETIME}\" \
+          --namespace=\"$KUBE_NAMESPACE\" \
+          --create-namespace \
+          \"$HELM_RELEASE_NAME\" \
+          $@
+          "
+
+    echo "${helm_command}"
+    eval "${helm_command}"
+  }
+
+  # Run Helm chart tests for a deployment
+  # see: https://helm.sh/docs/topics/chart_tests/
+  function run_chart_tests(){
+    helm test --namespace="$KUBE_NAMESPACE" "$HELM_RELEASE_NAME"
+  }
+
+  # Install chart dependencies
+  function download_chart_dependencies(){
+    echo "Downloading Helm chart dependencies.."
+    helm repo add fits-charts https://samvera-labs.github.io/fits-charts
+
+    helm dependency build .
+  }
+
+  function delete() {
+    echo "Deleting release: $HELM_RELEASE_NAME..."
+    helm delete --debug --namespace "$KUBE_NAMESPACE" "$HELM_RELEASE_NAME"
+
+    gl_proxy_label="gitlabproxysecret=true"
+    echo "Deleting gitlab dependency proxy secrets..."
+    kubectl delete --namespace "$KUBE_NAMESPACE" secrets -l "$gl_proxy_label" --ignore-not-found
+  }
+
+  # note: should not be used in production
+  function delete_stateful_set_pvcs(){
+    echo "Deleting any StatefulSet Persistent Volume Claims..."
+    # postgresql and zookeeper
+    kubectl delete pvc -l release="$HELM_RELEASE_NAME" --namespace="$KUBE_NAMESPACE"
+    # solr
+    kubectl delete pvc -l "app.kubernetes.io/instance=$HELM_RELEASE_NAME" --namespace="$KUBE_NAMESPACE"
+  }
+
+  function delete_test() {
+    test_name="${1}"
+
+    kubectl delete -n "$KUBE_NAMESPACE" "pod/${HELM_RELEASE_NAME}-${test_name}" || echo "${HELM_RELEASE_NAME}-${test_name} does not exist, assuming it was successful"
+  }
+
+  delete_rabbitmq_queue() {
+    echo "Deleting rabbitmq queue: $RABBITMQ_RELEASE_NAME..."
+    kubectl --kubeconfig $KUBECONFIG delete rabbitmqclusters.rabbitmq.com $RABBITMQ_RELEASE_NAME -n $KUBE_NAMESPACE
+  }
+
+  function rollback() {
+    echo "Rolling back to previous release of: $HELM_RELEASE_NAME..."
+    helm rollback --wait --namespace "$KUBE_NAMESPACE" "$HELM_RELEASE_NAME"
+  }
+
+  # Support supplying a base64-encoded helm values file for deployment
+  function setup_helm_values_file(){
+    if [ "$HELM_ENCODED_VALUES" ]; then
+      echo "HELM_ENCODED_VALUES CI/CD variable found. Decoding and creating HELM_VALUES_FILE"
+      echo ${HELM_ENCODED_VALUES} | base64 -d > $HELM_VALUES_FILE
+    fi
+  }
+
+  function decode_helm_values_files(){
+    COUNTER=0
+    if [ "$HELM_ENCODED_VALUES_FILES" ]; then
+      echo "WARNING: HELM_ENCODED_VALUES_FILES is deprecated, and will be removed at some point." \
+        "  Replace with a pre-generated Secret."
+
+      for values in $(echo $HELM_ENCODED_VALUES_FILES | sed "s/,/ /g")
+      do
+        echo "HELM_ENCODED_VALUES_FILES CI/CD variable found. Decoding and creating HELM_UPGRADE_FILE_VALUES_ARGS"
+        filename="helm-values-$COUNTER.yaml"
+        echo ${values} | base64 -d > $filename
+        export HELM_UPGRADE_FILE_VALUES_ARGS="$HELM_UPGRADE_FILE_VALUES_ARGS --values $filename"
+        COUNTER=$(( COUNTER+1 ));
+      done
+    fi
+  }
+
+  # A GitLab-integrated Kubernetes cluster should already have a KUBECONFIG created
+  # Otherwise, we assume the KUBECONFIG is setup as a base64-encoded environment variable
+  function setup_kube_config(){
+    if [ -n "${KUBE_ROLE_CONFIG}" ]; then
+      echo "A GitLab KUBECONFIG file was not detected, using KUBE_ROLE_CONFIG env var.."
+      mkdir -p /etc/deploy
+      export KUBECONFIG=/etc/deploy/config
+      echo ${KUBE_ROLE_CONFIG} | base64 -d > $KUBECONFIG
+      chmod 600 $KUBECONFIG
+    fi
+  }
+
+.helm:
+  image: ${CI_DEPENDENCY_PROXY_DIRECT_GROUP_IMAGE_PREFIX}/dtzar/helm-kubectl:4.1.1
+
+.helm3-deploy:
+  extends:
+    - .helm
+  variables:
+    HELM_VALUES_FILE: /helm-values.yml
+  before_script:
+    - export CHART_VER=$(yq '.version' < "charts/${SURFLINER_APP}/Chart.yaml")
+    - *helm3_deploy_helpers
+    - setup_kube_config
+    - setup_helm_values_file
+  stage: deploy
+
+.helm-publish-chart:
+  extends:
+    - .helm
+  variables:
+    HELM_EXPERIMENTAL_OCI: 1
+  script: |
+    cd ${CHART_DIR}
+    helm dep update
+
+    export CHART_NAME=$(yq '.name' <Chart.yaml)
+    export CHART_VER=$(yq '.version' <Chart.yaml)
+
+    if ! curl --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+         --fail \
+         "https://gitlab.com/api/v4/projects/surfliner%2Fsurfliner/registry/repositories/$REPOSITORY_ID/tags/$CHART_VER" ; then
+
+      helm registry login $CI_REGISTRY --username $CI_REGISTRY_USER --password $CI_REGISTRY_PASSWORD
+      helm package .
+      helm push $CHART_NAME-$CHART_VER.tgz oci://$CI_REGISTRY_IMAGE/charts
+    else
+      echo "\nTag ${CHART_VER} for ${CHART_NAME} already exists, refusing to overwrite."
+    fi
+
+.chart-check-readme-values:
+  stage: lint
+  image: ${CI_DEPENDENCY_PROXY_DIRECT_GROUP_IMAGE_PREFIX}/node:lts-alpine
+  needs: []
+  variables:
+    CHART_DIR: ""
+  script: |
+    apk add --no-cache git
+    cd "${CHART_DIR}"
+    npm i
+    npm run generate
+    git diff --exit-code --name-only README.md
+  tags:
+    - lint

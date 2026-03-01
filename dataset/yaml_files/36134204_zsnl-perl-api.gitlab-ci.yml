@@ -1,0 +1,168 @@
+stages:
+  - check
+  - build
+  - test
+  - deploy
+  - Release
+
+default:
+  image: ${BUILDER_CONTAINER}:master
+
+variables:
+  BUILD_USERNAME: ${CI_REGISTRY_USER}
+  BUILD_PASSWORD: ${CI_JOB_TOKEN}
+  CONTAINER_URL_API: ${CI_REGISTRY_IMAGE}/api
+  CONTAINER_URL_FRONTEND: ${CI_REGISTRY_IMAGE}/frontend
+  CONTAINER_URL_API2CSV: ${CI_REGISTRY_IMAGE}/api2csv
+  AUDIT_WEBPACK_DEV_SERVER: GHSA-cf66-xwfp-gvc4
+  AUDIT_ANGULAR: GHSA-89mq-4x47-5v83,GHSA-xvch-5gv4-984h,GHSA-7mwh-4pqv-wmr8
+
+.docker_login: &docker_login
+  - "docker login -u \"${BUILD_USERNAME}\" -p \"${BUILD_PASSWORD}\" $CI_REGISTRY"
+
+.audit_rules: &audit_rules
+  rules:
+    - if: $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /^(master|production|preprod|development)$/
+      allow_failure: true
+    - if: $CI_COMMIT_BRANCH =~ /^(master|production|preprod|development)$/
+      allow_failure: false
+    - if: $CI_COMMIT_TAG =~ /^release\//
+      allow_failure: false
+
+.container_build_rules: &container_build_rules
+  rules:
+    - if: $CI_PROJECT_ROOT_NAMESPACE != "xxllnc" && $CI_PROJECT_ROOT_NAMESPACE != "zaaksysteem"
+      when: never
+    - if: $CI_MERGE_REQUEST_ID
+      when: never
+    - if: $CI_COMMIT_TAG =~ /^release\//
+    - if: $CI_COMMIT_BRANCH =~ /^(master|production|preprod|development)$/
+
+# Audit
+Audit frontend/client:
+  <<: *audit_rules
+  stage: check
+  image: node:latest
+  script:
+    - cd client && npx improved-yarn-audit --min-severity high --exclude ${AUDIT_ANGULAR},${AUDIT_WEBPACK_DEV_SERVER}
+
+Audit frontend/frontend:
+  <<: *audit_rules
+  stage: check
+  image: node:latest
+  # at the time of writing we still had to whitelist some vulnerabilities check
+  # https://www.npmjs.com/advisories/ID to trace a package that needs an update
+  script:
+    - cd frontend && npx improved-yarn-audit --min-severity high --exclude ${AUDIT_ANGULAR},${AUDIT_WEBPACK_DEV_SERVER}
+
+OpenAPI Lint:
+  stage: check
+  image:
+    name: wework/speccy
+    entrypoint: [""]
+  script:
+    - speccy lint share/apidocs/v1/swagger/index.yaml
+  rules:
+    - if: $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /^(master|production|preprod|development)$/
+    - if: $CI_COMMIT_BRANCH =~ /^(master|production|preprod|development)$/
+    - if: $CI_COMMIT_TAG =~ /^release\//
+
+# Building
+Build API:
+  <<: *container_build_rules
+  tags: ["mintlab"]
+  stage: build
+  script:
+    - *docker_login
+    - docker build --pull -f docker/Dockerfile.backend -t "${CONTAINER_URL_API}:${CI_COMMIT_REF_SLUG}" --target production .
+    - docker push "${CONTAINER_URL_API}:${CI_COMMIT_REF_SLUG}"
+
+Prepare Build Frontend:
+  <<: *container_build_rules
+  image: node:erbium
+  tags: ["mintlab"]
+  stage: build
+  cache:
+    paths:
+      - ./node_modules/.cache
+  script:
+    - npm install 
+    - node_modules/@cyclonedx/bom/bin/make-bom.js --output cyclonedx.json
+  artifacts:
+    reports:
+      cyclonedx:
+        - cyclonedx.json
+        
+Build Frontend:
+  <<: *container_build_rules
+  tags: ["mintlab"]
+  stage: build
+  script:
+    - *docker_login
+    - docker build --pull --target production -f docker/Dockerfile.frontend -t ${CONTAINER_URL_FRONTEND}:${CI_COMMIT_REF_SLUG} .
+    - docker push "${CONTAINER_URL_FRONTEND}:${CI_COMMIT_REF_SLUG}"
+
+Build API2CSV:
+  <<: *container_build_rules
+  tags: ["mintlab"]
+  stage: build
+  script:
+    - *docker_login
+    - docker build --pull -f docker/Dockerfile.api2csv -t ${CONTAINER_URL_API2CSV}:${CI_COMMIT_REF_SLUG} .
+    - docker push ${CONTAINER_URL_API2CSV}:${CI_COMMIT_REF_SLUG}
+
+# Testing
+Test API:
+  <<: *container_build_rules
+  tags: ["mintlab"]
+  stage: test
+  script:
+    - *docker_login
+    - docker pull "${CONTAINER_URL_API}:${CI_COMMIT_REF_SLUG}"
+    - docker run --rm "${CONTAINER_URL_API}:${CI_COMMIT_REF_SLUG}" prove -l -It/lib --formatter TAP::Formatter::Console
+
+Push container images:
+  <<: *container_build_rules
+  tags: ["mintlab"]
+  stage: deploy
+  script:
+    - *docker_login
+    # Backend
+    - skopeo copy --all "docker://${CONTAINER_URL_API}:${CI_COMMIT_REF_SLUG}" "docker://${CONTAINER_URL_API}:${CI_COMMIT_REF_SLUG}-ci-${CI_PIPELINE_IID}"
+    # Frontend
+    - skopeo copy --all "docker://${CONTAINER_URL_FRONTEND}:${CI_COMMIT_REF_SLUG}" "docker://${CONTAINER_URL_FRONTEND}:${CI_COMMIT_REF_SLUG}-ci-${CI_PIPELINE_IID}"
+    # app-api2csv
+    - skopeo copy --all "docker://${CONTAINER_URL_API2CSV}:${CI_COMMIT_REF_SLUG}" "docker://${CONTAINER_URL_API2CSV}:${CI_COMMIT_REF_SLUG}-ci-${CI_PIPELINE_IID}"
+
+#
+# Release targets
+#
+
+.release: &AWSPush
+  stage: Release
+  tags: ["mintlab"]
+  rules:
+    - if: $CI_MERGE_REQUEST_ID
+      when: never
+    - if: $CI_COMMIT_TAG =~ /^release\//
+
+Push to AWS ECR (API):
+  <<: *AWSPush
+  script:
+    - \[ -z "$ECR_REPOSITORY_URL_API" \] && echo "No ECR repository url set for API!" && exit 1
+    - $(aws ecr get-login --no-include-email --region "$AWS_ECR_REGION")
+    - skopeo copy --all "docker://${CONTAINER_URL_API}:${CI_COMMIT_REF_SLUG}" "docker://$ECR_REPOSITORY_URL_API:$CI_COMMIT_REF_SLUG"
+
+Push to AWS ECR (Frontend):
+  <<: *AWSPush
+  script:
+    - \[ -z "$ECR_REPOSITORY_URL_FRONTEND" \] && echo "No ECR repository url set for Frontend!" && exit 1
+    - $(aws ecr get-login --no-include-email --region "$AWS_ECR_REGION")
+    - skopeo copy --all "docker://${CONTAINER_URL_FRONTEND}:${CI_COMMIT_REF_SLUG}" "docker://$ECR_REPOSITORY_URL_FRONTEND:$CI_COMMIT_REF_SLUG"
+
+Push to AWS ECR (API2CSV):
+  <<: *AWSPush
+  script:
+    - \[ -z "$ECR_REPOSITORY_URL_API2CSV" \] && echo "No ECR repository url set for API2CSV!" && exit 1
+    - $(aws ecr get-login --no-include-email --region "$AWS_ECR_REGION")
+    - skopeo copy --all "docker://${CONTAINER_URL_API2CSV}:${CI_COMMIT_REF_SLUG}" "docker://$ECR_REPOSITORY_URL_API2CSV:$CI_COMMIT_REF_SLUG"

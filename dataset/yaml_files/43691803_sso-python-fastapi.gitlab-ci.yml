@@ -1,0 +1,37 @@
+stages:
+  - test
+  - docker
+
+unit-test:
+  stage: test
+  image: python:3.10-slim
+  tags:
+    - private-runner
+  script:
+    - apt-get update
+    - apt-get full-upgrade -y
+    - apt-get install -y git gcc
+    - pip install --upgrade pip setuptools wheel
+    - pip install --no-cache-dir -r requirements/test.linux.txt
+    - pytest --cov=sso --cov-report=term
+  coverage: '/(?i)total.*? (100(?:\.0+)?\%|[1-9]?\d(?:\.\d+)?\%)$/'
+
+build-docker:
+  stage: docker
+  image: docker:dind
+  tags:
+    - private-runner
+  before_script:
+    - apk update
+    - apk add --no-cache git
+    - docker info
+  script:
+    - docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY
+    - docker build --no-cache -t $CI_PROJECT_NAME .
+    - docker save $CI_PROJECT_NAME > $CI_PROJECT_NAME.image.tar
+  only:
+    - main
+  artifacts:
+    paths:
+      - $CI_PROJECT_NAME.image.tar
+    expire_in: 1 day

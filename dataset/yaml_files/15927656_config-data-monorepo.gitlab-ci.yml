@@ -1,0 +1,19 @@
+# .gitlab-ci.yml includes create one large file with one "scope", which means:
+# - the syntax of all files included must be correct everytime
+# - variable names must be unique across all includes
+# - job names must be unique across all includes (and you cannot use variables in their names)
+
+
+image: alpine:latest
+
+stages:
+  - display_config_vars
+  - display_config_vars2
+  - build_config_files
+
+include:
+  #change this first include to be in another repository if 
+  #developers in this repo should not be able to change it even by an MR
+  - .build-template.yml
+  - 'plugin1/.gitlab-ci-include.yml'
+  - 'plugin2/.gitlab-ci-include.yml'

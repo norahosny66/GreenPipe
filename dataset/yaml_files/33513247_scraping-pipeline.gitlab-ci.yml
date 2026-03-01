@@ -1,0 +1,2 @@
+include:
+  remote: https://gitlab.com/arbetsformedlingen/devops/gitlab-cicd/jobtech-ci/-/raw/v2.5.8/security-no-container.yml

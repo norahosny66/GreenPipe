@@ -1,0 +1,294 @@
+include:
+- remote: https://gitlab.com/arbetsformedlingen/devops/gitlab-cicd/jobtech-ci/-/raw/v2.5.8/jobtech-ci.yml
+- remote: https://gitlab.com/arbetsformedlingen/devops/gitlab-cicd/jobtech-ci/-/raw/v2.5.8/deploy.yml
+- local: wait-for-deploy.yml
+
+default:
+  tags:
+    - himem_runner
+
+variables:
+  TEST_DISABLED: 1
+  DEPLOYS_DISABLED: 1
+  
+  SCHEMATHESIS_IMAGE: schemathesis/schemathesis:3.36.3
+  
+  CLOJURE_BUILD_IMAGE: clojure:temurin-23-tools-deps-noble
+
+  RUNTIME_BASE_IMAGE: eclipse-temurin:23.0.2_7-jre-noble
+  
+  TAXONOMY_TESTING_READ: http://api-internal-jobtech-taxonomy-api-testing-read.apps.testing.services.jtech.se
+
+.default_rules:
+  main_branch:
+    - if: '$CI_COMMIT_REF_SLUG == $CI_DEFAULT_BRANCH'  # Rule to check if on the default branch
+
+# This will store the libraries from deps.edn in a cache that will
+# be restored in the next job that uses the same cache key
+.cache-template: &cache-template
+  - key:
+      files:
+        - deps.edn
+    paths:
+      - .m2/repository
+
+# Prepare and download the libraries in deps.edn.
+# The result is cached between jobs and pipelines
+# if there are no changes in deps.edn.
+prepare_taxonomy_api_libraries:
+  stage: build
+  image: $CLOJURE_BUILD_IMAGE
+  cache: *cache-template
+  script:
+    - clojure -A:dev:prof:kaocha:prod:build:test:clj-kondo:eastwood:cljfmt:nsorg:outdated -P
+    - clojure -T:build update-build
+  artifacts:
+    paths:
+      - target
+
+# This job is defined in Auto DevOps template.
+# Here we tell it to use cached dependencies and
+# start after the documentation is build.
+build:
+  needs: [prepare_taxonomy_api_libraries]
+  cache: *cache-template
+
+validate_schema:
+  stage: test
+  allow_failure: true
+  needs: [prepare_taxonomy_api_libraries]
+  image: $CLOJURE_BUILD_IMAGE
+  cache: *cache-template
+  before_script:
+    # Install swagger-cli
+    - apt-get update
+    - apt-get install -y npm
+    - npm install -g swagger-cli
+  script:
+    - |
+      mkdir -p target
+
+      # Run the openapi validation and capture the output
+      swagger-cli validate resources/openapi.json &> target/openapi-validate.log
+      # Check the exit status of the validation
+      TEST_EXIT_STATUS=$?
+
+      # Extract relevant data from the test results
+      FAILURES=$(grep "must" target/openapi-validate.log | wc -l | tr -d ' ')
+
+      # Create the JUnit XML report
+      cat <<EOF > target/openapi-validate.xml
+      <?xml version="1.0" encoding="UTF-8"?>
+      <testsuite name="ValidateOpenAPI" failures="$FAILURES">
+        <properties>
+          <property name="failures" value="$FAILURES"/>
+        </properties>
+        <testcase classname="ValidateOpenAPI" name="Validate"/>
+      </testsuite>
+      EOF
+
+      # Print the test results as text
+      echo "Test Summary:"
+      echo "Failures: $FAILURES"
+
+      # Check the exit status of the API tests
+      if [ $TEST_EXIT_STATUS -ne 0 ]; then
+          echo "Test failed."
+          exit 1  # Return non-zero exit status if the test fails
+      fi
+  artifacts:
+    paths:
+      - target/openapi-validate.xml
+    reports:
+      junit: target/openapi-validate.xml
+
+lint_rap-lp:
+  allow_failure: true
+  stage: test
+  image: node:24
+  before_script:
+    - git clone https://github.com/diggsweden/rest-api-profil-lint-processor.git
+  script:
+    - cd rest-api-profil-lint-processor
+    - npm ci
+    # Lint the full OpenAPI file
+    - npm start -- -c AmeRules,ArqRules,DokRules,DotRules,FnsRules,ForRules,SakRules,UfnRules,VerRules -f ../resources/openapi.yaml > lint-output.txt
+    - cat lint-output.txt
+    - grep "allvarlighetsgrad..Error" -vqz lint-output.txt
+
+# Generic Schemathesis Task
+.schemathesis_task_template:
+  allow_failure: true
+  image: $CLOJURE_BUILD_IMAGE
+  before_script:
+    - apt-get update && apt-get install -y graphviz bash python3-venv python3-pip
+    - python3 -m venv /tmp/venv
+    - source /tmp/venv/bin/activate
+    - pip install schemathesis
+  script:
+    - clj -M:dev:api-shell-command "$CMD"
+  artifacts:
+    paths:
+      - $LOG_FILE
+    reports:
+      junit: $LOG_FILE
+
+schemathesis_exclude_graphql_tests:
+  extends: .schemathesis_task_template
+  stage: test
+  rules:
+    - !reference [.default_rules, main_branch]
+  variables:
+    LOG_FILE: "schemathesis-exclude-graphql-junit.xml"
+    CMD: "st run  --experimental=openapi-3.1  --junit-xml=${LOG_FILE} --hypothesis-deadline=None --show-trace --include-path-regex '^/v1/taxonomy/' --exclude-path-regex '^/v1/taxonomy/graphql' http://localhost:8080/v1/taxonomy/openapi.json"
+
+schemathesis_get_graphql_tests:
+  extends: .schemathesis_task_template
+  stage: test
+  rules:
+    - !reference [.default_rules, main_branch]
+  variables:
+    LOG_FILE: "schemathesis-get-graphql-junit.xml"
+    CMD: "st run --experimental=openapi-3.1 --junit-xml=${LOG_FILE} --hypothesis-deadline=None --show-trace --include-method GET --include-path-regex '^/v1/taxonomy/graphql' http://localhost:8080/v1/taxonomy/openapi.json"
+
+
+datomic_kaocha_tests:
+  stage: test
+  needs: [prepare_taxonomy_api_libraries]
+  image: $CLOJURE_BUILD_IMAGE
+  cache: *cache-template
+  script:
+    - apt-get update && apt-get install -y graphviz
+    - clj -M:test:kaocha --profile :ci
+    - bash test/scripts/cobertura.sh target/coverage/lcov-datomic.info -o coverage-datomic.xml
+  coverage: /^\|\s+ALL FILES\s\|\s+(\d+\.\d+)\s\|\s+\d+\.\d+\s\|\s*$/
+  artifacts:
+    paths:
+      - target/coverage/lcov-datomic.info
+      - cobertura-datomic.xml
+    reports:
+      junit: target/junit-datomic.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage-datomic.xml
+
+datahike_kaocha_tests:
+  needs: [prepare_taxonomy_api_libraries]
+  image: $CLOJURE_BUILD_IMAGE
+  cache: *cache-template
+  script:
+    - apt-get update && apt-get install -y graphviz
+    - DATABASE_BACKEND=:datahike clj -M:test:kaocha --profile :ci
+    - bash test/scripts/cobertura.sh target/coverage/lcov-datahike.info -o coverage-datahike.xml
+  coverage: /^\|\s+ALL FILES\s\|\s+(\d+\.\d+)\s\|\s+\d+\.\d+\s\|\s*$/
+  artifacts:
+    paths:
+      - target/coverage/lcov-datahike.info
+      - cobertura-datahike.xml
+    reports:
+      junit: target/junit-datahike.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage-datahike.xml
+
+datomic_server_api_tests:
+  stage: test
+  needs: [prepare_taxonomy_api_libraries]
+  image: $CLOJURE_BUILD_IMAGE
+  cache: *cache-template
+  script:
+    - apt-get update && apt-get install -y graphviz
+    - ./test/gitlab-ci/api-tests.sh config.edn
+  artifacts:
+    paths:
+      - target/junit-api-test-report-datomic.xml
+    reports:
+      junit: target/junit-api-test-report-datomic.xml
+
+datahike_server_api_tests:
+  stage: test
+  needs: [prepare_taxonomy_api_libraries]
+  image: $CLOJURE_BUILD_IMAGE
+  cache: *cache-template
+  script:
+    - apt-get update && apt-get install -y graphviz
+    - ./test/gitlab-ci/api-tests.sh config.datahike.edn
+  artifacts:
+    paths:
+      - target/junit-api-test-report-datahike.xml
+    reports:
+      junit: target/junit-api-test-report-datahike.xml
+
+# Autodeploy to the AF Testing cluster (tocp4)
+autodeploy_af_testing_read:
+  stage: deploy
+  image: $TOOL_IMG
+  resource_group: write-infra
+  variables:
+    OVERLAY: "af-taxonomy-acc"
+  rules:
+    - !reference [.default_rules, main_branch]
+  script:
+    - !reference [.deploy, script]
+
+# --- Trigger för Data Hub (Körs allra sist) ---
+.trigger_data_hub_template:
+  image: curlimages/curl:latest
+  script:
+    - |
+      curl --request POST \
+        --form "token=$DATA_HUB_TRIGGER_TOKEN" \
+        --form "ref=main" \
+        --form "variables[TAXONOMY_VERSION]=$CI_COMMIT_SHORT_SHA" \
+        --form "variables[DATASET_TO_BUILD]=$DATASET_NAME" \
+        "https://gitlab.com/api/v4/projects/74329722/trigger/pipeline" 
+
+trigger_yrkesvaljaren_build:
+  extends: .trigger_data_hub_template
+  stage: .post
+  needs:
+    - job: autodeploy_testing_read
+      optional: true
+    - job: autodeploy_af_testing_read
+      optional: true
+  variables:
+    DATASET_NAME: "yrkesvaljaren"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes:
+        - resources/taxonomy.zip
+
+# Wait for the deployment in the Testing cluster to reach state ready
+#on_deployed_testing:
+#  extends: wait_for_deploy
+#  stage: deploy
+#  variables:
+#    OCP_TEST_OVERLAY: "jobtech-taxonomy-api-testing-read"
+#  rules:
+#    - !reference [.default_rules, main_branch]
+#  needs: [autodeploy_testing_read]
+
+# Test the autodeployed app in the Testing cluster
+#test_testing_deployment:
+#  stage: deploy
+#  needs: [prepare_taxonomy_api_libraries, on_deployed_testing]
+#  image: $CLOJURE_BUILD_IMAGE
+#  cache: *cache-template
+#  script:
+#    - clj -X:test run-real-server-tests-for-host :host "\"$TAXONOMY_TESTING_READ\""
+#  rules:
+#    - !reference [.default_rules, main_branch]
+
+# Autodeploy to the Prod cluster
+#autodeploy_prod_read:
+#  stage: deploy
+#  image: $TOOL_IMG
+#  resource_group: write-infra
+#  variables:
+#    OVERLAY: "jobtech-taxonomy-api-prod-read"
+#  rules:
+#    - !reference [.default_rules, main_branch]
+#  script:
+#    - !reference [.deploy, script]
+#  needs: [test_testing_deployment]
+

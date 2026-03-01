@@ -1,0 +1,76 @@
+image: node:20
+
+stages:
+  - quality
+  - test
+  - build
+  - deploy
+  - release
+
+cache:
+  key: ${CI_COMMIT_REF_SLUG}
+  paths:
+    - node_modules/
+
+install:
+  stage: .pre
+  script:
+    - npm ci
+  artifacts:
+    paths:
+      - node_modules/
+
+lint:
+  stage: quality
+  script:
+    - npm run lint
+
+test:
+  stage: test
+  script:
+    - npm run test:coverage
+  coverage: '/All files[^|]*\|[^|]*\s+([\d\.]+)/'
+  artifacts:
+    when: always
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/cobertura-coverage.xml
+
+sast:
+  stage: test
+
+build:
+  stage: build
+  script:
+    - npm run build
+  artifacts:
+    paths:
+      - dist/
+
+pages:
+  stage: deploy
+  script:
+    - mkdir -p public
+    - cp demo/index.html public/
+    - cp dist/beblob.js public/
+    - cp -r dist/css public/css
+    - cp -r dist/images public/images
+  artifacts:
+    paths:
+      - public
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+publish:
+  stage: release
+  script:
+    - echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
+    - npm publish
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
+  dependencies:
+    - build
+
+include:
+  - template: Security/SAST.gitlab-ci.yml

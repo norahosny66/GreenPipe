@@ -1,0 +1,23 @@
+variables:
+  SAST_EXCLUDED_ANALYZERS: "eslint,semgrep"
+  SAST_REPORT_URL: "https://gitlab.com/gitlab-org/security-products/analyzers/security-code-scan/-/raw/master/qa/expect/$CI_PROJECT_NAME/gl-sast-report.json"
+  SAST_ANALYZER_IMAGE_TAG: "latest"
+
+include:
+  - template: SAST.gitlab-ci.yml
+  - https://gitlab.com/gitlab-org/security-products/ci-templates/raw/master/includes-dev/qa-sast.yml
+
+stages:
+  - build
+  - test
+  - qa
+
+build:
+  stage: build
+  image: mcr.microsoft.com/dotnet/core/sdk:2.2
+  script:
+    - dotnet build
+
+qa-security-code-scan-sast:
+  extends: .qa-sast
+  needs: ['security-code-scan-sast']

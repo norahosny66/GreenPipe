@@ -1,0 +1,4 @@
+[ZoneTransfer]
+ZoneId=3
+ReferrerUrl=https://claude.ai/chat/a249370d-9d2c-4195-8742-e530dbbace17
+HostUrl=https://claude.ai/api/organizations/a19ea75e-2cad-477b-8b09-37aac6b498a1/conversations/a249370d-9d2c-4195-8742-e530dbbace17/wiggle/download-file?path=%2Fmnt%2Fuser-data%2Foutputs%2Fcollect_gitlab_ci_dataset.py

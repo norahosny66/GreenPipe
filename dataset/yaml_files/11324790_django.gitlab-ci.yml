@@ -1,0 +1,37 @@
+image: docker:latest
+
+stages:
+  - build
+  - tag
+  
+services:
+  - docker:dind
+
+before_script:
+  - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+
+.build:
+  stage: build
+  script:
+    - docker build --pull -t "$CI_REGISTRY_IMAGE:$DOCKER_TAG" -f $DOCKERFILE_DIR/Dockerfile .
+    - docker push "$CI_REGISTRY_IMAGE:$DOCKER_TAG"
+  only:
+    - master
+
+
+build:3.2:
+  extends: .build
+  variables:
+    DOCKER_TAG: "3.2"
+    DOCKERFILE_DIR: "django3.2-python3.8"
+    
+tag-latest:
+  stage: tag
+  script:
+    - docker pull $CI_REGISTRY_IMAGE:$DOCKER_TAG
+    - docker tag $CI_REGISTRY_IMAGE:$DOCKER_TAG $CI_REGISTRY_IMAGE:latest
+    - docker push "$CI_REGISTRY_IMAGE:latest"
+  variables:
+    DOCKER_TAG: "3.2"
+  only:
+    - master

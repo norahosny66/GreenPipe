@@ -1,0 +1,218 @@
+---
+image: registry.gitlab.com/experimentslabs/garden-party/ci-runner/garden-party-runner:latest
+
+services:
+  - postgres:latest
+
+variables:
+  POSTGRES_DB: ci_db
+  POSTGRES_USER: runner
+  POSTGRES_PASSWORD: password
+  INSTANCE_SECRET_KEY_JWT: abcd
+
+stages:
+  - prepare
+  - test
+  - release
+
+cache: &cache
+  untracked: true
+  key:
+    files:
+      - Gemfile.lock
+      - yarn.lock
+  policy: pull
+  paths:
+    - 'vendor/'
+    - 'node_modules/'
+    - '.bundle/'
+
+before_script:
+  # Debug
+  - node --version
+  - ruby --version
+  - bundle --version
+  # Copy files
+  - cp config/database.ci.yml config/database.yml
+  # Use this line if there are issues with "yarn install" and the node engine not
+  # being in range, while actually being in it...
+  - yarn install --ignore-engines --silent
+  # Install Ruby dependencies in vendors
+  - bundle config set deployment 'true'
+  - bundle config set jobs $(nproc)
+  - bundle install --quiet
+
+# Bundle stage
+# ======================================
+
+bundle:
+  stage: prepare
+  rules:
+    - if: $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
+  script:
+    - echo "This job only fills the cache"
+  cache:
+    <<: *cache
+    policy: pull-push
+
+# Code linting
+# ======================================
+
+# Rubocop and other ruby checks on files
+rubocop:
+  stage: test
+  rules:
+    - if: $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
+  script:
+    - bundle exec rubocop
+    # Search for "@doing" tag in features
+    - "! grep --quiet '@doing' features/**/*.feature"
+  dependencies:
+    - bundle
+
+sass_lint:
+  stage: test
+  rules:
+    - if: $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
+  script: yarn run lint:style
+  dependencies:
+    - bundle
+
+es_lint:
+  stage: test
+  rules:
+    - if: $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
+  script: yarn run lint:js
+  dependencies:
+    - bundle
+
+haml_lint:
+  stage: test
+  rules:
+    - if: $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
+  script: bundle exec haml-lint app/views
+  dependencies:
+    - bundle
+
+generated_files:
+  stage: test
+  rules:
+    - if: $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
+  script:
+    - bundle exec rails db:test:prepare
+    - bundle exec rake i18n:add-models-attributes
+    - git diff
+    - git diff-index --quiet HEAD
+    - bundle exec rake icons:generate
+    - git diff
+    - git diff-index --quiet HEAD
+  dependencies:
+    - bundle
+
+factory_bot_lint:
+  stage: test
+  rules:
+    - if: $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
+  script:
+    - bundle exec rails db:test:prepare
+    - bundle exec rake factory_bot:lint
+  dependencies:
+    - bundle
+
+# Tests
+# ======================================
+
+rspec:
+  stage: test
+  rules:
+    - if: $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
+  script:
+    # Install dependencies
+    - bundle exec rails db:test:prepare
+    - bundle exec rake i18n:js:export
+    - RAILS_ENV=test bundle exec rails assets:precompile
+    - bundle exec rspec --fail-fast --format progress
+    - bundle exec rake swagger:changed
+  dependencies:
+    - bundle
+  artifacts:
+    when: on_failure
+    paths:
+      - tmp/rspec_screenshots
+    expire_in: 1 day
+  # See: https://docs.gitlab.com/ci/testing/code_coverage/#coverage-regex-patterns
+  coverage: /(?:LOC\s\(\d+\.\d+%|Line Coverage:\s\d+\.\d+%)/
+
+brakeman:
+  stage: test
+  rules:
+    - if: $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
+  script:
+    - bundle exec brakeman --ensure-latest
+  dependencies:
+    - bundle
+
+vitest:
+  stage: test
+  rules:
+    - if: $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
+  script:
+    - bundle exec rake js:generate:factories_test
+    - yarn run test --coverage --bail 1
+  dependencies:
+    - bundle
+  coverage: /All\sfiles.*?\s+(\d+.\d+)/
+
+# Archives and releases
+# ======================================
+
+pages:
+  stage: release
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - bundle exec rake i18n:js:export
+    - yarn doc:build
+    - rm -rf public
+    - mv docs/public public
+  artifacts:
+    paths:
+      - public
+
+# Build the application and create a deployable package
+package:
+  stage: release
+  rules:
+    - if: $CI_COMMIT_TAG || $CI_COMMIT_BRANCH == 'develop'
+  before_script: []
+  dependencies: []
+  cache: []
+  script:
+    # Move the script as it will be deleted
+    - mv .gitlab/package_and_release ..
+    # Build and cleanup
+    - .gitlab/ci_build
+    # Make the artifact URL available for subsequent jobs
+    - ../package_and_release
+
+# Publishes packages in Gitlab registry
+docker-images:
+  stage: release
+  rules:
+    - if: $CI_COMMIT_TAG || $CI_COMMIT_BRANCH == 'develop'
+  image: docker
+  services:
+    - docker:dind
+  needs:
+    # Rely on published packages
+    - job: package
+  variables:
+    DOCKER_DRIVER: overlay2
+    REGISTRY_URL: $CI_REGISTRY/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME
+  cache: []
+  dependencies: []
+  before_script:
+    - docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY
+  script:
+    # Explicit "sh" call is required
+    - sh .gitlab/make_and_release_docker_images

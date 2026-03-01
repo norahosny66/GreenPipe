@@ -1,0 +1,59 @@
+#AutoDevOps Requires a file named Dockerfile at the repo root - even if you are redirecting with the DOCKERFILE_PATH variable.
+# (An MR has already been submitted with a fix)
+#IMPORTANT: You cannot merge job fragments with autodevops jobs (typically used for customizating autodevops) here because 
+# it is being called by "trigger:include:" NOT "include:" (which can combine jobs)
+#IMPORTANT: Variables must be here on a per-job basis so that they are isolated from each other by the child pipeline 
+#  when multiple child pipelines run at once.
+#IMPORTANT: "Skip outdate deployment jobs" must be DISABLED for this repository (enabled by default),
+#  docs: https://docs.gitlab.com/ee/ci/pipelines/settings.html#skip-outdated-deployment-jobs
+#IMPORTANT: DOCKERFILE_PATH is not needed because we cd into each subdirectory build. This also means Dockerfile
+#  commands that reference local files (e.g. COPY) must use relative paths to the same directory where the Dockerfile
+#  is stored.
+#IMPORTANT: GitLab's built-in sidecar PostgreSQL containers don't work well with this pattern and are disabled.
+
+variables:
+  AUTO_DEVOPS_EXPLICITLY_ENABLED: "1"
+  POSTGRES_ENABLED: "false"  
+
+db-service:
+  variables:
+    CONTAINER_DIR: "db-service"
+    CI_APPLICATION_REPOSITORY: "$CI_REGISTRY_IMAGE/$CONTAINER_DIR"
+    HELM_RELEASE_NAME: "$CI_ENVIRONMENT_SLUG-$CONTAINER_DIR"
+
+  only:
+    changes:
+      - db-service/**/*
+
+  trigger:
+    include: 'db-service/container-db-service.gitlab-ci.yml'
+    strategy: depend
+
+payment-service:
+  variables:
+    CONTAINER_DIR: "payment-service"
+    CI_APPLICATION_REPOSITORY: "$CI_REGISTRY_IMAGE/$CONTAINER_DIR"
+    HELM_RELEASE_NAME: "$CI_ENVIRONMENT_SLUG-$CONTAINER_DIR"
+
+  only:
+    changes:
+      - payment-service/**/*
+
+  trigger:
+    include: 'payment-service/container-payment-service.gitlab-ci.yml'
+    strategy: depend
+
+webui-service:
+  variables:
+    CONTAINER_DIR: "webui-service"
+    CI_APPLICATION_REPOSITORY: "$CI_REGISTRY_IMAGE/$CONTAINER_DIR"
+    HELM_RELEASE_NAME: "$CI_ENVIRONMENT_SLUG-$CONTAINER_DIR"
+
+  only:
+    changes:
+      - webui-service/**/*
+
+  trigger:
+    include: 'webui-service/container-webui-service.gitlab-ci.yml'
+    strategy: depend
+

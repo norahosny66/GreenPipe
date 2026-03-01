@@ -1,0 +1,18 @@
+include:
+  - project: "to-be-continuous/tools/gitlab-ci"
+    file: "/templates/extract.yml"
+  - project: "to-be-continuous/tools/gitlab-ci"
+    file: "/templates/validation.yml"
+  - project: "to-be-continuous/kicker"
+    file: "/templates/validation.yml"
+  - component: $CI_SERVER_FQDN/to-be-continuous/bash/gitlab-ci-bash@3
+    inputs:
+      shellcheck-files: "*.sh"
+  - component: $CI_SERVER_FQDN/to-be-continuous/semantic-release/gitlab-ci-semrel@4
+    inputs:
+      # disable semrel for all synch'd repositories
+      release-disabled: true
+      auto-release-enabled: true
+
+variables:
+  GITLAB_CI_FILES: "templates/gitlab-ci-golang.yml"

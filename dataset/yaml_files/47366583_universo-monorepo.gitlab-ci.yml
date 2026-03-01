@@ -1,0 +1,44 @@
+image: node:latest
+
+stages:
+  - build
+  - deploy
+
+cache:
+  paths:
+    - universo-frontend/node_modules/
+    # - universo-frontend/.env
+
+build_artifact:
+  stage: build
+  script:
+    - pwd
+    - . ~/.bashrc
+    - pwd
+    - sudo  cp ~/.env universo-frontend/.env
+    # - echo "GRAPHQL_URI=$GRAPHQL_URI" >> .env  
+    # - echo "APP_HOST=$APP_HOST" >> .env
+    # - echo "CAPACITOR_GRAPHQL_URI=$CAPACITOR_GRAPHQL_URI" >> .env
+    # - echo "DEBUG=$DEBUG" >> .env
+    # - cat .env
+    # - cp .env universo-frontend/.env
+
+    - cd universo-frontend/
+    - npm ci
+    - npx quasar build
+  artifacts:
+    when: on_success
+    expire_in: 30 days
+    name: nova_universo_pro_front
+    paths:
+      - "universo-frontend/dist"
+
+deploy_spa:
+  stage: deploy
+  script:
+    - pwd
+    - . ~/.bashrc
+    - sudo systemctl stop nginx
+    - sudo -u www-data rm -rf /var/www/front
+    - sudo -u www-data cp -r universo-frontend/dist/spa /var/www/front
+    - sudo systemctl start nginx

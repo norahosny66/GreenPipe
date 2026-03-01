@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: 2024 UL Research Institutes
+# SPDX-License-Identifier: MIT
+
+stages:
+  - test
+  - build
+  - deploy
+
+variables:
+  TERRAFORM_MODULE_SYSTEM: google
+
+include:
+  - local: terraform-development-auto-apply.yml
+  - local: terraform-development-destroy.yml
+  - local: terraform-development-validate.yml
+  - local: terraform-fmt.yml
+  - local: terraform-module-build.yml
+  - local: terraform-module-release.yml
+  - local: terraform-production-apply.yml
+  - local: terraform-production-destroy.yml
+  - local: terraform-production-plan.yml
+  - local: terraform-production-trivy.yml
+  - local: terraform-production-validate.yml
+  - local: terraform-staging-auto-apply.yml
+  - local: terraform-staging-destroy.yml
+  - local: terraform-staging-validate.yml
+  - local: terraform-trivy.yml
+  - local: terraform-validate.yml
+
+  - project: buildgarden/pipelines/detect-secrets
+    ref: 0.2.1
+    file:
+      - detect-secrets.yml
+  - project: buildgarden/pipelines/gitlab
+    ref: 0.2.2
+    file:
+      - gitlab-release.yml
+  - project: buildgarden/pipelines/prettier
+    ref: 0.3.2
+    file: prettier.yml

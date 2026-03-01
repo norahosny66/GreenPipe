@@ -1,0 +1,303 @@
+include:
+  - template: Jobs/Container-Scanning.gitlab-ci.yml
+  - template: Jobs/Dependency-Scanning.gitlab-ci.yml
+  - template: Jobs/SAST.gitlab-ci.yml
+  - template: Jobs/SAST-IaC.gitlab-ci.yml
+  - template: Jobs/Secret-Detection.gitlab-ci.yml
+  - template: DAST.gitlab-ci.yml
+  - component: gitlab.com/infor-cloud/gitlab-components/software-bill-of-materials/generate-sbom-npm@$SBOM_COMPONENT_VERSION
+    inputs:
+      stage: container_scanning
+      package_manifest: "package.json"
+      validate: true
+      verbose: true
+      remote_sbom_component_mapping_file_namespace_path: infor-cloud/martian-cloud/sbom-component-mapping
+      remote_sbom_component_mapping_file_branch: main
+      remote_sbom_component_mapping_file_path: mapping-node.json
+  - component: gitlab.com/infor-cloud/gitlab-components/software-bill-of-materials/add-container-sbom-details@$SBOM_COMPONENT_VERSION
+    inputs:
+      stage: container_scanning
+      remote_sbom_component_mapping_file_namespace_path: infor-cloud/martian-cloud/sbom-component-mapping
+      remote_sbom_component_mapping_file_branch: main
+      remote_sbom_component_mapping_file_paths:
+        ["mapping-alpine.json", "mapping-node.json"]
+      report_filenames:
+        - "gl-sbom-report.cdx.json"
+      needs: [container_scanning]
+    rules:
+      - if: "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"
+      - if: '$CI_MERGE_REQUEST_EVENT_TYPE == "merge_train"'
+      - if: $CI_COMMIT_TAG
+  - component: gitlab.com/infor-cloud/gitlab-components/software-bill-of-materials/merge-sboms@$SBOM_COMPONENT_VERSION
+    inputs:
+      hierarchical: true
+      name: tharsis-ui
+      version: $CI_COMMIT_TAG
+
+stages:
+  - pre-build
+  - test
+  - publish
+  - container_scanning
+  - dast
+
+# Only start pipelines on Merge Requests or the default branch
+workflow:
+  rules:
+    - if: $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH
+      when: always
+    - if: $CI_MERGE_REQUEST_IID
+      when: always
+    - if: $CI_COMMIT_TAG
+      when: always
+    - when: never
+
+variables:
+  # Used for test builds of the container and scanning
+  IMAGE_TAG: "$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA"
+  NODE_OPTIONS: "--max_old_space_size=1536"
+
+default:
+  services: []
+  tags:
+    - oss
+  retry:
+    max: 2
+    when:
+      - unknown_failure
+      - api_failure
+      - stuck_or_timeout_failure
+      - runner_system_failure
+  interruptible: true
+
+# Use SHA of .gitlab-ci.yml and package-lock.json for cache key
+.cache-template: &cache-template
+  paths:
+    - node_modules/
+  key:
+    files:
+      - .gitlab-ci.yml
+      - package-lock.json
+    prefix: node_modules
+
+.node:
+  image: node:18-alpine
+  before_script:
+    - apk --no-cache update && apk --no-cache upgrade
+    - npm install
+  cache:
+    <<: *cache-template
+    policy: pull
+
+#################################
+##            RULES            ##
+#################################
+
+.on_tag_events:
+  rules:
+    - if: "$CI_COMMIT_TAG"
+
+.on_default_branch_and_merge_train:
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: on_success
+    - if: $CI_MERGE_REQUEST_EVENT_TYPE == "merge_train"
+
+.on_default_branch:
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: always
+
+.on_default_branch_manual:
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+
+#################################
+##            BUILD            ##
+#################################
+
+populate_npm_cache:
+  extends: .node
+  stage: pre-build
+  script:
+    - echo "successfully installed dependencies"
+  cache:
+    <<: *cache-template
+    policy: push
+  rules:
+    - changes:
+        - .gitlab-ci.yml
+        - package-lock.json
+      when: always
+    - when: never
+
+npm-sbom (package.json):
+  cache:
+    <<: *cache-template
+    policy: pull
+  rules:
+    - if: $CI_COMMIT_TAG
+
+lint:
+  extends: .node
+  stage: test
+  script:
+    - npm run lint
+
+package:
+  extends: .node
+  stage: test
+  variables:
+    KUBERNETES_MEMORY_REQUEST: 6Gi
+    KUBERNETES_MEMORY_LIMIT: 6Gi
+    KUBERNETES_NODE_SELECTOR_FAMILY: "node.kubernetes.io/instance-type=c6a.xlarge"
+  script:
+    - export VITE_THARSIS_UI_BUILD_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    - npm run build
+  artifacts:
+    paths:
+      - dist/
+
+publish ui docker:
+  image: docker:latest
+  services:
+    - docker:dind
+  stage: publish
+  tags:
+    - oss
+    - docker
+  dependencies:
+    - package
+  before_script:
+    - apk add git
+  script:
+    - |
+      # Build registry URI
+      registry_uri="$CI_REGISTRY/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME"
+
+      docker login -u gitlab-ci-token -p "$CI_JOB_TOKEN" "$CI_REGISTRY"
+
+      echo "Building tharsis-ui image"
+      docker build -t $CI_PROJECT_NAME:latest --no-cache .
+
+      if [ ! -z "$CI_COMMIT_TAG" ]; then
+        echo "This is a tagged commit so major, major.minor and full tags will be pushed to registry"
+
+        # Version is based on semantic versioning
+        full_version=$(docker run --rm -v "$(pwd)":/git-semver mdomke/git-semver | grep -Eo '[0-9\.].*$')
+        major_version=$(docker run --rm -v "$(pwd)":/git-semver mdomke/git-semver -format x | grep -Eo '[0-9\.].*$')
+        major_minor_version=$(docker run --rm -v "$(pwd)":/git-semver mdomke/git-semver -format x.y | grep -Eo '[0-9\.].*$')
+
+        echo "Version tagging the ui image"
+        docker image tag $CI_PROJECT_NAME:latest $registry_uri:$full_version
+        docker image tag $CI_PROJECT_NAME:latest $registry_uri:$major_version
+        docker image tag $CI_PROJECT_NAME:latest $registry_uri:$major_minor_version
+
+        echo "Pushing tharsis-ui versioned images to registry"
+        docker image push $registry_uri:$full_version
+        docker image push $registry_uri:$major_version
+        docker image push $registry_uri:$major_minor_version
+
+        latest_version=$(git tag | tr - \~ | sort -rV | tr \~ - | head -n1)
+        if [[ "$CI_COMMIT_TAG" == "$latest_version" ]]
+          then
+            echo "Build is latest, tagging and pushing image as latest"
+            docker image tag $CI_PROJECT_NAME:latest $registry_uri:latest
+            docker image push $registry_uri:latest
+        fi
+      else
+        echo "This is a normal commit so $IMAGE_TAG tag will be pushed to GitLab registry"
+        docker image tag $CI_PROJECT_NAME:latest $registry_uri:$IMAGE_TAG
+        docker image push $registry_uri:$IMAGE_TAG
+      fi
+  rules:
+    - !reference [.on_default_branch_and_merge_train, rules]
+    - !reference [.on_tag_events, rules]
+  interruptible: false
+
+#################################
+##            SAST             ##
+#################################
+
+container_scanning:
+  stage: container_scanning
+  variables:
+    CS_IMAGE: "$CI_REGISTRY/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME:latest"
+    GIT_STRATEGY: fetch
+  rules:
+    - !reference [.on_default_branch_and_merge_train, rules]
+    - !reference [.on_tag_events, rules]
+
+gemnasium-dependency_scanning:
+  script:
+    - /analyzer run
+    - cat gl-dependency-scanning-report.json
+  variables:
+    DS_INCLUDE_DEV_DEPENDENCIES: "false"
+  artifacts:
+    paths:
+      - "**/gl-sbom-*.cdx.json"
+      - gl-dependency-scanning-report.json
+    reports:
+      cyclonedx: "**/gl-sbom-*.cdx.json"
+      dependency_scanning: gl-dependency-scanning-report.json
+  rules:
+    - !reference [.on_default_branch_and_merge_train, rules]
+
+semgrep-sast:
+  artifacts:
+    paths:
+      - gl-sast-report.json
+  rules:
+    - !reference [.on_default_branch_and_merge_train, rules]
+
+kics-iac-sast:
+  artifacts:
+    paths:
+      - gl-sast-report.json
+  rules:
+    - !reference [.on_default_branch_and_merge_train, rules]
+
+secret_detection:
+  rules:
+    - !reference [.on_default_branch_and_merge_train, rules]
+
+dast:
+  services:
+    - name: registry.gitlab.com/infor-cloud/martian-cloud/tharsis/tharsis-all-in-one-docker:latest
+      alias: tharsis
+    - name: registry.gitlab.com/infor-cloud/martian-cloud/tharsis/tharsis-ui:${IMAGE_TAG}
+      alias: tharsis-ui
+  needs:
+    - publish ui docker
+  variables:
+    DAST_WEBSITE: "http://localhost:3000"
+    DAST_AUTH_URL: "http://localhost:8080/realms/tharsis/protocol/openid-connect/auth?client_id=tharsis&redirect_uri=http%3A%2F%2Flocalhost%2F&response_type=id_token&scope=openid%20profile%20email&state=6c323175464243e6a657b75e19885a99&nonce=4fd0a5e072c74e8fb913bec704f2361b"
+    DAST_USERNAME: martian
+    DAST_PASSWORD: martian
+    DAST_USERNAME_FIELD: "css:[name=username]"
+    DAST_PASSWORD_FIELD: "css:[name=password]"
+    DAST_SUBMIT_FIELD: "css:[name=login]"
+    DAST_BROWSER_SCAN: "true"
+    DAST_FULL_SCAN_ENABLED: "true"
+    DAST_EXCLUDE_URLS: "http://localhost/static/.*"
+    KUBERNETES_SERVICE_CPU_REQUEST: "250m"
+    KUBERNETES_SERVICE_CPU_LIMIT: "500m"
+    KUBERNETES_SERVICE_MEMORY_REQUEST: "500Mi"
+    KUBERNETES_SERVICE_MEMORY_LIMIT: "1Gi"
+    JAVA_OPTS_APPEND: "-Djava.net.preferIPv4Stack=false -Djava.net.preferIPv6Addresses=true"
+  before_script:
+    - |
+      timeout 600 bash -c 'while [[ "$(curl -s -o /dev/null -w ''%{http_code}'' http://localhost:8000/health)" != "200" ]]; do sleep 5; done' || false
+  rules:
+    - !reference [.on_default_branch_and_merge_train, rules]
+
+merge-cyclonedx-sboms:
+  rules:
+    - !reference [.on_tag_events, rules]
+  needs:
+    - job: "add-container-sbom-details"
+      optional: true
+    - job: "npm-sbom (package.json)"
+      optional: true

@@ -1,0 +1,56 @@
+stages:
+  - build
+  - chart
+  - pages
+
+variables:
+  DOCKER_TLS_CERTDIR: ""
+  IMAGE_NAME: "beindigo/helm-docker-gitlab:${CI_PIPELINE_IID}"
+
+build_image:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - echo "Logging in to Docker Hub as beindigo"
+    - echo "$DOCKERHUB_TOKEN" | docker login -u "beindigo" --password-stdin
+    - 'echo "Building Docker image: $IMAGE_NAME"'
+    - docker build -t "$IMAGE_NAME" .
+    - 'echo "Pushing Docker image: $IMAGE_NAME"'
+    - docker push "$IMAGE_NAME"
+    - echo "$IMAGE_NAME" > version.txt
+  artifacts:
+    paths:
+      - version.txt
+      - helm-docker-gitlab/
+
+package_chart:
+  stage: chart
+  image:
+    name: alpine/helm:3.14.0
+    entrypoint: [""]
+  script:
+    - mkdir -p public
+    - echo "Linting Helm chart..."
+    - helm lint helm-docker-gitlab/
+    - echo "Packaging Helm chart..."
+    - helm package helm-docker-gitlab/ --destination public/
+    - echo "Generating Helm repo index for GitLab Pages..."
+    - helm repo index public/ --url "$CI_PAGES_URL"
+  artifacts:
+    paths:
+      - public
+  only:
+    - main
+
+pages:
+  stage: pages
+  script:
+    - echo "Publishing Helm chart repo via GitLab Pages"
+  artifacts:
+    paths:
+      - public
+  only:
+    - main
+

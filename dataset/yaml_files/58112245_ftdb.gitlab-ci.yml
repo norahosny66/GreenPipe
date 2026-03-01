@@ -1,0 +1,59 @@
+include:
+  # this defines steps in the stage 'deploy'
+  - project: 'intern/ci-kit/docker-deployer'
+    file: 'docker-deployer.yml'
+
+stages:
+  - build
+  - container
+  - deploy
+
+build-ruby:
+  image: ruby:3.3-alpine
+  stage: build
+  variables:
+    RAILS_ENV: production
+  script:
+    - apk add --no-cache build-base libpq-dev imagemagick-libs vips tzdata yarn sqlite gcompat linux-headers yaml-dev
+    - yarn install --frozen-lockfile
+    - yarn test
+    - export BUNDLE_APP_CONFIG=$(pwd)/.bundle
+    - bundle config --local deployment true
+    - bundle config --local without development
+    - bundle install
+    - bundle exec rake assets:precompile
+    - bundle exec rails test
+  artifacts:
+    name: "$CI_JOB_STAGE-$CI_COMMIT_REF_NAME"
+    paths:
+      - public
+      - vendor/bundle
+      - .bundle/config
+
+container-web:
+  stage: container
+  needs:
+    - build-ruby
+  variables:
+    DOCKER_IMAGE_NAME: web
+    DOCKER_SRC_DIR: .
+    DOCKER_ARGS: -f docker/web.Dockerfile
+    PARENT_PIPELINE_ID: $CI_PIPELINE_ID
+  trigger:
+    strategy: depend
+    include:
+      - local: '.gitlab-ci.container-needs-build-ruby.yml'
+
+container-app:
+  stage: container
+  needs:
+    - build-ruby
+  variables:
+    DOCKER_IMAGE_NAME: app
+    DOCKER_SRC_DIR: .
+    DOCKER_ARGS: -f docker/app.Dockerfile --build-arg SECRET_KEY_BASE=$SECRET_KEY_BASE
+    PARENT_PIPELINE_ID: $CI_PIPELINE_ID
+  trigger:
+    strategy: depend
+    include:
+      - local: '.gitlab-ci.container-needs-build-ruby.yml'

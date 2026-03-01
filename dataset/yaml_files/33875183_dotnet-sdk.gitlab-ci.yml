@@ -1,0 +1,73 @@
+.hello:
+- export PATH="$PATH:$HOME/.dotnet/tools"
+- time dotnet tool install
+        --global
+    dotnet-script
+
+- cd examples/web/fsharpforfunandprofit.com/posts
+
+- dotnet fsi fsharp-in-60-seconds.fsx
+- dotnet fsi fvsc-sum-of-squares.fsx
+- dotnet script fvsc-sum-of-squares.cs
+- ls --color
+- dotnet new --help
+- dotnet new --list
+- dotnet new console --help
+- 'dotnet new console --help --language F#'
+- dotnet new console --dry-run
+- dotnet new console
+- ls --color
+- dotnet build --help
+- dotnet build
+- dotnet run --help
+- dotnet run
+
+# https://fsharp.org/use/linux/
+
+.header:
+- (. /etc/os-release ; echo $PRETTY_NAME)
+
+.install:
+- export DOTNET_ROOT=$HOME/.dotnet
+- export PATH="$PATH:$HOME/.dotnet"
+- curl -sSL https://dot.net/v1/dotnet-install.sh | bash /dev/stdin
+
+.apk-musl:
+- !reference [.header]
+- apk add --update-cache --quiet
+    bash
+    curl
+    icu-libs
+    krb5-libs
+    libgcc
+    libintl
+    libssl3
+    libstdc++
+    zlib
+    # libssl1.1
+- !reference [.install]
+
+.apk-glibc:
+- !reference [.header]
+- apk add --update-cache --quiet
+    bash
+    curl
+    icu-libs
+    krb5-libs
+    libgcc
+    libssl3
+    libstdc++
+    zlib
+    # libssl1.1
+- !reference [.install]
+
+hello-alpine:
+    script: !reference [.hello]
+    before_script: !reference [.apk-musl]
+    image: alpine:edge
+
+hello-wolfi:
+    allow_failure: true
+    script: !reference [.hello]
+    before_script: !reference [.apk-glibc]
+    image: chainguard/wolfi-base

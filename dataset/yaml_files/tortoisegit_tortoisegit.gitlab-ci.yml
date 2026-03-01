@@ -1,0 +1,69 @@
+# General info: https://docs.gitlab.com/ee/ci/yaml/
+
+doc:
+  image: ubuntu:jammy
+  before_script:
+    - echo -e "section_start:`date +%s`:install_packages[collapsed=true]\r\e[0K\e[1;96mInstalling packages\e[0m"
+    - apt-get update -qq
+    - DEBIAN_FRONTEND=noninteractive apt-get install -qq --no-install-recommends -y xsltproc docbook-xsl nant aspell aspell-en python3 git
+    - echo -e "section_end:`date +%s`:install_packages\r\e[0K"
+  script:
+    - ./.gitlab-ci/check.sh
+  except:
+    refs:
+      - tags
+  only:
+    changes:
+      - .gitlab-ci.yml
+      - .gitlab-ci/check.sh
+      - doc/images/en/**/*
+      - doc/source/**/*
+      - doc/xsl/**/*
+      - doc/doc.build*
+      - doc/Aspell/*
+      - doc/scripts/**
+      - doc/CheckIDD.sh
+      - src/TortoiseMege/resource.h
+      - src/TortoiseProc/resource.h
+      - src/Resources/*.rc
+      - src/Resources/*HelpMapping.ini
+
+spellcheck-pot:
+  image: debian:trixie
+  before_script:
+    - echo -e "section_start:`date +%s`:install_packages[collapsed=true]\r\e[0K\e[1;96mInstalling packages\e[0m"
+    - apt-get update -qq
+    - apt-get install -qq --no-install-recommends -y aspell aspell-en gettext python3
+    - echo -e "section_end:`date +%s`:install_packages\r\e[0K"
+  script:
+    - perl -pi -e 's|\\r||g' Languages/Tortoise.pot
+    - msginit --no-translator -l en_US -i Languages/Tortoise.pot -o Languages/Tortoise_en.po
+    - perl -pi -e 's|&([^ ])|\1|g' Languages/Tortoise_en.po
+    - cp doc/Aspell/TortoiseGit.tmpl.pws doc/Aspell/Temp.pws
+    - perl -pi -e 's/\$LANG\$/en/g' doc/Aspell/Temp.pws
+    - python3 .gitlab-ci/gettext-lint/POFileSpell --command='aspell --encoding=UTF-8 --add-extra-dicts="./doc/Aspell/en.pws" --add-extra-dicts=./doc/Aspell/Temp.pws --add-extra-dicts=./doc/Aspell/TortoisePot.pws --lang=en list' Languages/Tortoise_en.po > spellcheck.log
+    - if [[ $(cat spellcheck.log 2>/dev/null | wc -l) -gt 1 ]]; then
+        echo -e "\e[1;31m!!! Found typos !!!\e[0m";
+        cat spellcheck.log;
+        exit 1;
+      fi
+  except:
+    refs:
+      - tags
+  only:
+    changes:
+      - .gitlab-ci.yml
+      - .gitlab-ci/gettext-lint/*
+      - Languages/Tortoise.pot
+      - doc/Aspell/*.pws
+
+commit-messages:
+  image: debian:trixie
+  before_script:
+    - echo -e "section_start:`date +%s`:install_packages[collapsed=true]\r\e[0K\e[1;96mInstalling packages\e[0m"
+    - apt-get update -qq
+    - apt-get install -qq -y git
+    - echo -e "section_end:`date +%s`:install_packages\r\e[0K"
+  script:
+    - .gitlab-ci/check-commits.sh
+  only: [merge_requests]

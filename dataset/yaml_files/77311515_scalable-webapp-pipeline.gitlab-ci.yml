@@ -1,0 +1,73 @@
+stages:
+  - infra
+  - build
+  - deploy
+
+variables:
+  DOCKER_TLS_CERTDIR: ""
+  AWS_DEFAULT_REGION: "ap-south-1"
+  EKS_CLUSTER: "demo-eks"
+  IMAGE_TAG: "latest"
+  ECR_REPO: "915432554164.dkr.ecr.ap-south-1.amazonaws.com/demo-app"
+  IMAGE: "$ECR_REPO:$IMAGE_TAG"
+
+# -----------------------------
+# 1) INFRA (Terraform)
+# -----------------------------
+infra:
+  stage: infra
+  image:
+    name: hashicorp/terraform:1.6.6
+    entrypoint: [""]
+  before_script:
+    - cd terraform
+    - rm -rf .terraform .terraform.lock.hcl
+  script:
+    - terraform init -upgrade
+    - terraform apply -auto-approve
+  only:
+    - main
+
+# -----------------------------
+# 2) BUILD & PUSH (Docker → ECR)
+# -----------------------------
+build_and_push:
+  stage: build
+  image: docker:24
+  services:
+    - docker:24-dind
+  before_script:
+    - apk add --no-cache bash curl aws-cli
+    - aws --version
+    - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$(echo $ECR_REPO | awk -F/ '{print $1}')"
+  script:
+    - docker build -t demo-app:latest ./app
+    - docker tag demo-app:latest "$IMAGE"
+    - docker push "$IMAGE"
+  only:
+    - main
+
+# -----------------------------
+# 3) DEPLOY (kubectl → EKS)
+# -----------------------------
+deploy:
+  stage: deploy
+  image: alpine:3.20
+  before_script:
+    - apk add --no-cache bash curl jq aws-cli
+    - curl -sLO https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl
+    - chmod +x kubectl
+    - mv kubectl /usr/local/bin/kubectl
+    - kubectl version --client
+    - aws eks update-kubeconfig --region "$AWS_DEFAULT_REGION" --name "$EKS_CLUSTER"
+  script:
+    - kubectl apply -f k8s/deployment.yaml
+    - kubectl apply -f k8s/service.yaml
+    - kubectl apply -f k8s/hpa.yaml
+    - kubectl rollout status deployment/demo-app --timeout=180s
+    - kubectl get pods -o wide
+    - kubectl get svc
+  needs:
+    - build_and_push
+  only:
+    - main

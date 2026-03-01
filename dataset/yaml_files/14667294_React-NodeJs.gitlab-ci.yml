@@ -1,0 +1,15 @@
+stages:
+    - deploy
+
+deploy:
+    stage: deploy
+    type: deploy
+    variables:
+        APP_NAME: art--gallery
+        HEROKU_API_KEY: $HEROKU_API_KEY
+    before_script:
+        - gem install dpl
+    script:
+        - dpl --provider=heroku --app=$APP_NAME --api-key=$HEROKU_API_KEY
+    only:
+        - master

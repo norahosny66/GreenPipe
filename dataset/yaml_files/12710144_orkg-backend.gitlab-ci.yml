@@ -1,0 +1,257 @@
+image: azul/zulu-openjdk-debian:21
+
+variables:
+  DOCKER_HOST: "tcp://docker:2375"
+  # Improve performance by using overlayfs
+  DOCKER_DRIVER: overlay2
+  # Disable Gradle daemon during build
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+  GIT_SUBMODULE_STRATEGY: recursive
+  GIT_SUBMODULE_FORCE_HTTPS: true
+  GIT_SUBMODULE_DEPTH: 1
+
+default:
+  cache:
+    # Dedicated cache the Gradle wrapper
+    - &gradle_wrapper_cache
+      key:
+        files:
+          - gradle/wrapper/gradle-wrapper.properties
+        prefix: gradle-wrapper
+      paths:
+        - .gradle-user-home/wrapper/
+    # Regular Gradle cache, for all things Gradle needs. Uses the cache from the default branch if none was found.
+    - &gradle_cache
+      key: gradle-$CI_COMMIT_REF_SLUG
+      fallback_keys:
+        - gradle-$CI_DEFAULT_BRANCH
+      paths:
+        - .gradle-user-home/caches/
+        # Prevent the welcome message to be shown every time
+        - .gradle-user-home/notifications/
+        # Save build artifacts to cache; follows official Gradle.gitlab-ci.yml template
+        - "**/build/"
+
+.gradle_build_job:
+  before_script:
+    # Tell Gradle to write its files to a separate directory within the build directory, so files do not conflict.
+    - export GRADLE_USER_HOME=`pwd`/.gradle-user-home
+    # Remove files that might be problematic (recommended by Travis CI)
+    - rm -f  ${GRADLE_USER_HOME}/caches/modules-2/modules-2.lock
+  tags:
+    - saas-linux-medium-amd64
+
+stages:
+  - build
+  - package
+  - verify
+  - deploy
+
+build:
+  stage: build
+  extends: .gradle_build_job
+  services:
+    - docker:dind
+  needs: []
+  script:
+    - apt update && apt install --assume-yes graphviz
+    - ./gradlew --build-cache spotlessCheck buildHealth build asciidoctor openapi3
+  coverage: '/^Coverage:\s(\d+\.\d+%)/'
+  artifacts:
+    name: build
+    when: always
+    paths:
+      - '**/build/reports/'
+      - rest-api-server/build/libs/rest-api-server-*.jar
+      - documentation/build/docs/asciidoc/
+      - documentation/build/api-spec/openapi3.yaml
+    reports:
+      junit: rest-api-server/build/test-results/**/TEST-*.xml
+  rules:
+    - when: always
+
+generate_api_clients:
+  stage: package
+  extends: .gradle_build_job
+  cache:
+    - <<: *gradle_cache
+      policy: pull
+    - <<: *gradle_wrapper_cache
+      policy: pull
+  needs:
+    - job: build
+      artifacts: false
+  allow_failure: true
+  script:
+    - ./gradlew --build-cache :documentation:generateAllClients
+  artifacts:
+    name: api-clients
+    expose_as: api-clients
+    expire_in: 1 mos
+    paths:
+      - documentation/build/generated-clients
+  rules:
+    - if: $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH || $CI_COMMIT_TAG
+      when: always
+    - if: $CI_COMMIT_REF_NAME != $CI_DEFAULT_BRANCH
+      when: manual
+
+# Deploy documentation to GitLab Pages.
+pages:
+  stage: deploy
+  resource_group: gitlab-pages
+  needs:
+    - job: build
+      artifacts: true
+  script:
+    - mkdir -p public
+    - cp -r documentation/build/docs/asciidoc/* public/
+  artifacts:
+    paths:
+      - public
+  rules:
+    - if: $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH
+
+# Template for building Docker images.
+.docker_build_instructions:
+  stage: package
+  extends: .gradle_build_job
+  cache:
+    - <<: *gradle_cache
+      policy: pull
+    - <<: *gradle_wrapper_cache
+      policy: pull
+  needs:
+    - job: build
+      artifacts: true
+  script:
+    # Turn a list of whitespace-separated tags into a comma-separated list, as GitLab gets confused with commas and variable substitutions.
+    - docker_tags=$(echo "$IMAGE_TAGS" | sed 's/ \+/,/g')
+    # Build using Jib (pushed automatically)
+    - ./gradlew --build-cache jib -Djib.to.image=$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA -Djib.to.tags=$docker_tags -Djib.to.auth.username=$REGISTRY_USER -Djib.to.auth.password=$REGISTRY_PASSWORD
+
+docker_build_master:
+  extends: .docker_build_instructions
+  variables:
+    IMAGE_TAGS: latest master
+  rules:
+    - if: $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH
+
+docker_build:
+  extends: .docker_build_instructions
+  variables:
+    IMAGE_TAGS: $CI_COMMIT_REF_NAME release
+  rules:
+    - if: $CI_COMMIT_REF_NAME != $CI_DEFAULT_BRANCH
+
+# (Security) Scanning templates
+include:
+  - template: Security/Container-Scanning.gitlab-ci.yml
+  - template: Security/Secret-Detection.gitlab-ci.yml
+  # Disabled because the scanner does not work properly with Gradle multi-project builds. Remove dot if fixed. See below.
+  #- template: Dependency-Scanning.gitlab-ci.yml
+  - template: 'Workflows/Branch-Pipelines.gitlab-ci.yml'  # Prevents duplicate pipelines
+
+container_scanning:
+  stage: verify
+  variables:
+    CS_IMAGE: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+  cache: []
+  needs:
+    - job: docker_build
+      optional: true
+      artifacts: false
+    - job: docker_build_master
+      optional: true
+      artifacts: false
+  rules:
+    - when: always
+
+# Disabled because the scanner does not work properly with Gradle multi-project builds. Remove dot if fixed. See above.
+.dependency_scanning:
+  stage: verify
+  needs: []
+
+secret_detection:
+  stage: verify
+  cache: []
+  needs: []
+  rules:
+    - when: always
+  variables:
+    SECRET_DETECTION_EXCLUDED_PATHS: '.gradle'
+
+publish_typescript_client:
+  stage: deploy
+  image: node:latest
+  cache: []
+  allow_failure: true
+  variables:
+    GIT_STRATEGY: none
+  needs:
+    - job: generate_api_clients
+      artifacts: true
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - cd ./documentation/build/generated-clients/typescript-client
+    - echo "@orkg:registry=${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/npm/" > .npmrc
+    - echo "//${CI_SERVER_HOST}/api/v4/projects/${CI_PROJECT_ID}/packages/npm/:_authToken=${CI_JOB_TOKEN}" >> .npmrc
+    - npm install
+    - npm publish
+
+publish_python_client:
+  stage: deploy
+  image: python:latest
+  cache: []
+  allow_failure: true
+  variables:
+    GIT_STRATEGY: none
+    TWINE_USERNAME: gitlab-ci-token
+    TWINE_PASSWORD: $CI_JOB_TOKEN
+  needs:
+    - job: generate_api_clients
+      artifacts: true
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - pip install build twine
+    - cd ./documentation/build/generated-clients/python-client
+    - python -m build
+    - python -m twine upload --repository-url ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi dist/*
+
+deployment_trigger:incubating:
+  stage: deploy
+  image: buildpack-deps:buster-curl
+  script:
+    - echo "Triggering deployment for branch $CI_COMMIT_REF_NAME"
+    - curl --fail -X POST -F "token=$PIPELINE_TRIGGER_TOKEN" -F "ref=master" -F "variables[ORKG_COMPONENT_NAME]=orkg-rest-api" -F "variables[ORKG_COMPONENT_REF_NAME]=$CI_COMMIT_REF_NAME" https://git.tib.eu/api/v4/projects/1317/trigger/pipeline
+  rules:
+    - if: $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH
+  # Disable cloning, downloading artifacts and caching
+  cache: []
+  dependencies: []
+  variables:
+    GIT_STRATEGY: none
+  needs:
+    - docker_build_master
+    - secret_detection
+    - container_scanning
+
+deployment_trigger:release:
+  stage: deploy
+  image: buildpack-deps:buster-curl
+  script:
+    - echo "Triggering deployment for release version $CI_COMMIT_TAG"
+    - curl --fail -X POST -F "token=$PIPELINE_TRIGGER_TOKEN" -F "ref=master" -F "variables[ORKG_COMPONENT_NAME]=orkg-rest-api" -F "variables[ORKG_COMPONENT_REF_NAME]=$CI_COMMIT_REF_NAME" -F "variables[ORKG_COMPONENT_RELEASE_VERSION]=$CI_COMMIT_TAG" https://git.tib.eu/api/v4/projects/1317/trigger/pipeline
+  rules:
+    - if: $CI_COMMIT_TAG
+  # Disable cloning, downloading artifacts and caching
+  cache: []
+  dependencies: []
+  variables:
+    GIT_STRATEGY: none
+  needs:
+    - docker_build
+    - secret_detection
+    - container_scanning

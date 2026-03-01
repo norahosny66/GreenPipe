@@ -1,0 +1,107 @@
+stages:
+  - build
+
+include:
+  - project: metastack/internal/ci-cd-helpers
+    ref: v3
+    file: helpers.yml
+
+.build:
+  extends: .docker-build
+  services:
+    - docker:dind
+
+# PHP 8.1
+build-8.1:
+  extends: .build
+  variables:
+    PHP_VERSION: '8.1'
+  script:
+    - docker build --pull -t "$CI_REGISTRY_IMAGE:$PHP_VERSION" --target base -f $PHP_VERSION/Dockerfile .
+    - docker push "$CI_REGISTRY_IMAGE:$PHP_VERSION"
+
+build-8.1-xdebug:
+  extends: .build
+  variables:
+    PHP_VERSION: '8.1'
+  needs:
+    - job: build-8.1
+  script:
+    - docker build -t "$CI_REGISTRY_IMAGE:${PHP_VERSION}-xdebug" --target development -f $PHP_VERSION/Dockerfile .
+    - docker push "$CI_REGISTRY_IMAGE:${PHP_VERSION}-xdebug"
+
+# PHP 8.2
+build-8.2:
+  extends: .build
+  variables:
+    PHP_VERSION: '8.2'
+  script:
+    - docker build --pull -t "$CI_REGISTRY_IMAGE:$PHP_VERSION" --target base -f $PHP_VERSION/Dockerfile .
+    - docker push "$CI_REGISTRY_IMAGE:$PHP_VERSION"
+
+build-8.2-xdebug:
+  extends: .build
+  variables:
+    PHP_VERSION: '8.2'
+  needs:
+    - job: build-8.2
+  script:
+    - docker build -t "$CI_REGISTRY_IMAGE:${PHP_VERSION}-xdebug" --target development -f $PHP_VERSION/Dockerfile .
+    - docker push "$CI_REGISTRY_IMAGE:${PHP_VERSION}-xdebug"
+
+# PHP 8.3
+build-8.3:
+  extends: .build
+  variables:
+    PHP_VERSION: '8.3'
+  script:
+    - docker build --pull -t "$CI_REGISTRY_IMAGE:$PHP_VERSION" --target base -f $PHP_VERSION/Dockerfile .
+    - docker push "$CI_REGISTRY_IMAGE:$PHP_VERSION"
+
+build-8.3-xdebug:
+  extends: .build
+  variables:
+    PHP_VERSION: '8.3'
+  needs:
+    - job: build-8.3
+  script:
+    - docker build -t "$CI_REGISTRY_IMAGE:${PHP_VERSION}-xdebug" --target development -f $PHP_VERSION/Dockerfile .
+    - docker push "$CI_REGISTRY_IMAGE:${PHP_VERSION}-xdebug"
+
+# PHP 8.4
+build-8.4:
+  extends: .build
+  variables:
+    PHP_VERSION: '8.4'
+  script:
+    - docker build --pull -t "$CI_REGISTRY_IMAGE:$PHP_VERSION" --target base -f $PHP_VERSION/Dockerfile .
+    - docker push "$CI_REGISTRY_IMAGE:$PHP_VERSION"
+
+build-8.4-xdebug:
+  extends: .build
+  variables:
+    PHP_VERSION: '8.4'
+  needs:
+    - job: build-8.4
+  script:
+    - docker build -t "$CI_REGISTRY_IMAGE:${PHP_VERSION}-xdebug" --target development -f $PHP_VERSION/Dockerfile .
+    - docker push "$CI_REGISTRY_IMAGE:${PHP_VERSION}-xdebug"
+
+# PHP 8.5
+build-8.5:
+  extends: .build
+  variables:
+    PHP_VERSION: '8.5'
+  script:
+    - docker build --pull -t "$CI_REGISTRY_IMAGE:$PHP_VERSION" --target base -f $PHP_VERSION/Dockerfile .
+    - docker push "$CI_REGISTRY_IMAGE:$PHP_VERSION"
+
+build-8.5-xdebug:
+  extends: .build
+  variables:
+    PHP_VERSION: '8.5'
+  needs:
+    - job: build-8.5
+  script:
+    - docker build -t "$CI_REGISTRY_IMAGE:${PHP_VERSION}-xdebug" --target development -f $PHP_VERSION/Dockerfile .
+    - docker push "$CI_REGISTRY_IMAGE:${PHP_VERSION}-xdebug"

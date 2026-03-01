@@ -1,0 +1,85 @@
+variables:
+  DEBIAN_FRONTEND: noninteractive
+  GIT_SUBMODULE_STRATEGY: recursive
+  SCENICOS_IMAGE_BUILDER_IMAGE: "registry.gitlab.com/sat-mtl/distribution/scenicos/scenicos-image-builder:latest"
+# Configure S3 bucket access key variables in project or group CI/CD parameters:
+#   AWS_ACCESS_KEY_ID
+#   AWS_SECRET_ACCESS_KEY
+  SCENICOS_RELEASE_S3_BUCKET: scenicos-release
+# Configure Mender Personal Access Token variable in project CI/CD parameters:
+#   SCENICOS_CI_MENDER_PERSONAL_ACCESS_TOKEN
+# https://docs.mender.io/server-integration/using-the-apis#personal-access-tokens
+# Mender PATs are valid for one year.
+# SCENICOS_CI_MENDER_PERSONAL_ACCESS_TOKEN token expires on 2024-07-13
+# Mender server to upload artifact to
+  MENDER_SERVER: "https://mender.scenic.sat.qc.ca"
+# Configure job to run on a specific runner
+  RUNNER_HOSTNAME:
+    description: "Optionally select which specific GitLab runner to use. Each runner needs to have a tag manually defined with its hostname."
+
+stages:
+  - build-convert-and-upload
+
+.build-convert-and-upload:
+  tags:
+      - ${RUNNER_HOSTNAME}
+  timeout: 4 hour
+  stage: build-convert-and-upload
+  image: docker:git
+  before_script:
+    - docker kill scenicos-${CI_COMMIT_REF_SLUG}-build-convert-and-upload && echo "Existing job container stopped." || echo "No existing job container to stop."
+    - docker rm scenicos-${CI_COMMIT_REF_SLUG}-build-convert-and-upload && echo "Existing job container removed." || echo "No existing job container to remove."
+  script:
+    - docker run
+      --rm
+      --name=scenicos-${CI_COMMIT_REF_SLUG}-build-convert-and-upload
+      --privileged
+      --cap-add=SYS_MODULE
+      -v /dev:/dev
+      -v /lib/modules:/lib/modules:ro
+      ${SCENICOS_IMAGE_BUILDER_IMAGE}
+      bash -c "
+        echo -e \"\n\n*** Cloning project... ***\n\n\" &&
+        cd /opt &&
+        git clone -b ${CI_COMMIT_REF_NAME} ${CI_REPOSITORY_URL} &&
+        cd ${CI_PROJECT_NAME} &&
+        git submodule update --init &&
+        echo -e \"\n\n*** Patching Mender-convert... ***\n\n\" &&
+        patch -p0 < 3rdparty/mender-convert.patch &&
+        echo -e \"\n\n*** Building base image... ***\n\n\" &&
+        scripts/build-base-image.sh x86-64 &&
+        echo -e \"\n\n*** Converting base image to Mender... ***\n\n\" &&
+        export CI_PIPELINE_IID=${CI_PIPELINE_IID} &&
+        export CI_COMMIT_TAG=${CI_COMMIT_TAG} &&
+        export CI_COMMIT_REF_SLUG=${CI_COMMIT_REF_SLUG} &&
+        export CI_COMMIT_SHORT_SHA=${CI_COMMIT_SHORT_SHA} &&
+        scripts/convert-base-image-to-mender.sh x86-64 &&
+        echo -e \"\n\n*** Uploading final image to S3...***\n\n\" &&
+        export SCENICOS_CI_S3_AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} &&
+        export SCENICOS_CI_S3_AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY} &&
+        export SCENICOS_RELEASE_S3_BUCKET=${SCENICOS_RELEASE_S3_BUCKET} &&
+        scripts/ci/upload-final-image.sh &&
+        echo -e \"\n\n*** CI pipeline image creation terminated. Image is available at following URL:\n\" &&
+        scripts/generate-download-url.sh build/x86-64/deploy &&
+        echo -e \"\n\n*** Uploading Mender artifact to mender server...***\n\n\" &&
+        mender-cli --skip-verify --server ${MENDER_SERVER} --token-value ${SCENICOS_CI_MENDER_PERSONAL_ACCESS_TOKEN} artifacts upload build/x86-64/deploy/*.mender &&
+        echo -e \"\n\n*** Creating GitLab Release final image to S3...***\n\n\" &&
+        export CI_SERVER_URL=${CI_SERVER_URL} &&
+        export CI_JOB_TOKEN=${CI_JOB_TOKEN} &&
+        export CI_PROJECT_ID=${CI_PROJECT_ID} &&
+        export CI_COMMIT_TAG=${CI_COMMIT_TAG} &&
+        export CI_COMMIT_SHA=${CI_COMMIT_SHA} &&
+        scripts/generate-download-url.sh build/x86-64/deploy | scripts/ci/create-release.sh"
+  after_script:
+    - docker kill scenicos-${CI_COMMIT_REF_SLUG}-build-convert-and-upload && echo "Existing job container stopped." || echo "No existing job container to stop."
+    - docker rm scenicos-${CI_COMMIT_REF_SLUG}-build-convert-and-upload && echo "Existing job container removed." || echo "No existing job container to remove."
+
+manual-build-convert-and-upload:
+  extends: .build-convert-and-upload
+  rules:
+    - when: manual
+      allow_failure: true
+
+release-build-convert-and-upload:
+  extends: .build-convert-and-upload
+  only: ['tags']

@@ -1,0 +1,51 @@
+stages:
+  - test
+  - build
+  - deploy
+
+variables:
+  DOCKER_DRIVER: overlay2
+
+test:
+  stage: test
+  image: python:3.10
+  script:
+    - pip install --no-cache-dir --prefer-binary -r requirements.txt
+    - pip install pytest pylint httpx
+    - pytest tests/ || echo "Tests failed but continuing for demo"
+    - pylint src/ || echo "Linting warnings found"
+
+build_training:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker build -t $CI_REGISTRY_IMAGE/training:$CI_COMMIT_REF_SLUG .
+    - docker push $CI_REGISTRY_IMAGE/training:$CI_COMMIT_REF_SLUG
+  only:
+    - master
+    - tags
+
+build_api:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker build -f Dockerfile.api -t $CI_REGISTRY_IMAGE/api:$CI_COMMIT_REF_SLUG .
+    - docker push $CI_REGISTRY_IMAGE/api:$CI_COMMIT_REF_SLUG
+  only:
+    - master
+    - tags
+
+continuous_training:
+  stage: deploy
+  image: python:3.10
+  script:
+    - pip install --no-cache-dir --prefer-binary -r requirements.txt
+    - python run_pipeline.py --smoke-test
+  only:
+    - schedules

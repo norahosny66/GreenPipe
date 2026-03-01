@@ -1,0 +1,7 @@
+
+include:
+  - template: SAST.gitlab-ci.yml
+  - https://gitlab.com/gitlab-org/security-products/ci-templates/raw/master/includes-dev/qa-sast.yml
+
+stages:
+  - test

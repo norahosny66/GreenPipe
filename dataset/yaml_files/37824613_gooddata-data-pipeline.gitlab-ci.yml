@@ -1,0 +1,42 @@
+stages:
+  - build
+  - extract_load
+  - transform
+  - analytics
+
+##########################
+# Job templates
+##########################
+.base:
+  image: python:3.10-slim-bullseye
+
+.base_rules:
+  rules:
+    - if: '$RUN_ALL_JOBS == "true"'
+      when: manual
+
+.elt_rules:
+  rules:
+    - if: '$FULL_REFRESH == "true"'
+      when: manual
+
+# Global variables
+variables:
+  SRC_DATA_PIPELINE: "data_pipeline"
+  IMAGES_WORKDIR: "/project"
+
+# Separate files for each use case
+# Prevent pipeline to be running if we change one gitlab-ci.yaml file containing all use cases
+include:
+  - ".gitlab-ci/env_vars/image-meltano.yml"
+  - ".gitlab-ci/env_vars/image-dbt.yml"
+  - ".gitlab-ci/env_vars/image-gooddata.yml"
+  # TODO - elta.yaml contains variables for all jobs (ELT, analytics). Split it, so its change does not trigger all jobs
+  - ".gitlab-ci/env_vars/elta.yml"
+  - ".gitlab-ci/gitlab-ci-build-base.yml"
+  - ".gitlab-ci/gitlab-ci-build-meltano.yml"
+  - ".gitlab-ci/gitlab-ci-build-dbt.yml"
+  - ".gitlab-ci/gitlab-ci-build-dbt-gooddata.yml"
+  - ".gitlab-ci/gitlab-ci-extract-load.yml"
+  - ".gitlab-ci/gitlab-ci-transform.yml"
+  - ".gitlab-ci/gitlab-ci-analytics.yml"

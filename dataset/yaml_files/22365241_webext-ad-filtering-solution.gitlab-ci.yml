@@ -1,0 +1,469 @@
+default:
+  interruptible: true
+  image: node:18.17.1
+  tags:
+    - runner-webext-dev
+
+variables:
+  npm_config_audit: "false"
+  npm_config_fund: "false"
+  npm_config_prefer_offline: "true"
+  # Oldest supported versions
+  OLDEST_CHROMIUM_MV2_VERSION: "79.0.3945.79"
+  OLDEST_CHROMIUM_MV3_VERSION: "124.0.6367.60"
+  OLDEST_FIREFOX_VERSION: "68.0"
+  # Latest Chromium version that still supports MV2
+  LATEST_CHROMIUM_MV2_VERSION: "128.0.6613.0"
+  # Latest Firefox version using browser local storage in incognito mode
+  BSL_FIREFOX_INCOGNITO_VERSION: "114.0.2"
+
+# Pipeline rules
+workflow:
+  rules:
+    # Do not trigger merge request pipelines
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: never
+    - when: always
+
+# The following CI variables modify which jobs run in a pipeline:
+# - FULL: Full set of tests, including additional browsers. Used in nightly runs.
+# - CHECKTESTS: Check tests quality. Used in nightly runs.
+
+.full-run:
+  rules:
+    - if: $FULL == "true"
+
+.checktests-run:
+  rules:
+    - if: $CHECKTESTS == "true"
+
+.master-run:
+  rules:
+    - !reference [.full-run, rules]
+    - if: $CI_COMMIT_BRANCH == "master"
+
+# Won't be triggered on flaky debugging pipelines
+.avoid-flaky-run:
+  rules:
+    - !reference [.full-run, rules]
+    # Run manually on commits that contain [flaky] or checktests pipelines
+    - if: $CHECKTESTS == "true"
+      when: manual
+    - if: $CI_COMMIT_MESSAGE =~ /\[flaky]/
+      when: manual
+    # Run automatically if other conditions not filled
+    - when: always
+
+.docker-image:
+  image: docker:24.0.5
+  services:
+    - "docker:24.0.5-dind"
+  before_script:
+    - docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY
+  variables:
+    IMAGE_TAG: $CI_REGISTRY_IMAGE
+    BASIC_IMAGE: $IMAGE_TAG:basic-image-$CI_PIPELINE_ID
+    FUNCTIONAL_IMAGE: $IMAGE_TAG:functional-image-$CI_PIPELINE_ID
+    COMPLIANCE_IMAGE: $IMAGE_TAG:compliance-image-$CI_JOB_ID
+    DOCKER_OPTIONS: --shm-size=2g -t
+
+stages:
+  - build
+  - unit
+  - test
+  - functional
+  - fuzz
+  - compliance
+  - integration
+  - performance
+
+build:src:
+  stage: build
+  before_script:
+    - npm install
+  script:
+    - npm run build
+    - DOCS_ERROR=$(npm run docs 2>&1 >/dev/null) && if [ ! -z "$DOCS_ERROR" ]; then echo $DOCS_ERROR && false; fi
+    - npm run docs-adblockpluscore
+  artifacts:
+    paths:
+      - dist/
+      - public/
+    expire_in: 1 week
+
+lint:
+  stage: build
+  before_script:
+    - npm install
+  script:
+    - npm run lint
+
+# Publishes the docs to https://eyeo.gitlab.io/adblockplus/abc/webext-ad-filtering-solution
+# and https://eyeo.gitlab.io/adblockplus/abc/webext-ad-filtering-solution/adblockpluscore/index.html
+# Requirements: https://docs.gitlab.com/ee/user/project/pages/introduction.html#gitlab-pages-requirements
+pages:
+  stage: build
+  needs: ["build:src"]
+  script:
+    # Check that docs folder exists
+    - "[ -d \"public\" ]"
+  artifacts:
+    paths:
+      - public
+  rules:
+    # Only publishes docs pushed to master
+    - if: $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH
+
+build:basic-image:
+  stage: build
+  extends: .docker-image
+  needs: []
+  script:
+    - docker build -t $BASIC_IMAGE -f test/dockerfiles/basic.Dockerfile .
+    - docker push $BASIC_IMAGE
+
+build:functional-image:
+  stage: build
+  extends: .docker-image
+  needs: ["build:src"]
+  script:
+    - docker build -t $FUNCTIONAL_IMAGE -f test/dockerfiles/functional.Dockerfile --build-arg SKIP_BUILD=1 --build-arg BROWSER=chromium .
+    - docker push $FUNCTIONAL_IMAGE
+
+.basic-image:
+  extends: .docker-image
+  needs: ["build:basic-image"]
+
+# Unit tests
+
+unit:
+  stage: unit
+  needs: []
+  before_script:
+    - npm install
+  script:
+    - npm test
+  rules:
+    - !reference [.avoid-flaky-run, rules]
+
+adblockpluscore:browser:
+  stage: unit
+  extends: .basic-image
+  script:
+    - docker run $DOCKER_OPTIONS --entrypoint npm $BASIC_IMAGE run test:adblockpluscore:browser
+  rules:
+    - !reference [.avoid-flaky-run, rules]
+
+# Functional tests
+.functional:
+  stage: functional
+  extends: .docker-image
+  needs: ["build:functional-image"]
+  script:
+    COMMIT_FIRST_LINE=$(echo "$CI_COMMIT_MESSAGE" | head -1);
+    if [ -z "${COMMIT_FIRST_LINE##*"[flaky]"*}" ]; then
+      echo "The first line of the commit message contains the [flaky] tag!";
+      OTHER_PARAMS="-e ONLY_FLAKY=true";
+    fi;
+    if echo "$CHECKTESTS" | grep -q "true"; then
+      OTHER_PARAMS="$OTHER_PARAMS -e TEST_RUNS=10";
+    fi;
+    docker run $DOCKER_OPTIONS -e TEST_PARAMS="$TEST_PARAMS" $OTHER_PARAMS $FUNCTIONAL_IMAGE;
+
+# Functional tests - MV2
+func:v2:chromium:latest:
+  extends: .functional
+  variables:
+    BROWSER: chromium latest
+    TEST_PARAMS: 2 $BROWSER
+
+func:v2:chromium:incognito:
+  extends: .functional
+  variables:
+    BROWSER: chromium latest
+    TEST_PARAMS: 2 $BROWSER --incognito
+
+func:v2:chromium:oldest:
+  extends: .functional
+  variables:
+    BROWSER: chromium $OLDEST_CHROMIUM_MV2_VERSION
+    TEST_PARAMS: 2 $BROWSER
+
+func:v2:firefox:latest:
+  extends: .functional
+  variables:
+    BROWSER: firefox latest
+    TEST_PARAMS: 2 $BROWSER
+
+func:v2:firefox:incognito:
+  extends: .functional
+  variables:
+    BROWSER: firefox latest
+    TEST_PARAMS: 2 $BROWSER --incognito
+
+func:v2:firefox:oldest:
+  extends: .functional
+  variables:
+    BROWSER: firefox $OLDEST_FIREFOX_VERSION
+    TEST_PARAMS: 2 $BROWSER
+
+.edge_install_windows: &edge_install_windows
+  - choco install -y microsoft-edge
+
+# Replaces nodejs v21.2.0 (default) with v18.17.1
+.nodejs_install_windows: &nodejs_install_windows
+  - choco uninstall -y nodejs nodejs.install
+  - choco install -y --no-progress nodejs --version 18.17.1
+  - Import-Module $env:ChocolateyInstall\helpers\chocolateyProfile.psm1
+  - refreshenv
+
+.functional-windows:
+  stage: functional
+  needs: ["build:src"]
+  variables:
+    # The eyeo windows CI runners fail to check out large numbers of packages,
+    # like the extensions monorepo, if npm can't retry fetching dependencies.
+    npm_config_fetch_retries: 2
+    CI_PROJECT_ID_MAINSTREAM: 22365241
+  before_script:
+    - *edge_install_windows
+    - *nodejs_install_windows
+    - npm install
+  tags:
+    - eyeo-windows
+
+func:v2:windows:edge:
+  extends: .functional-windows
+  script:
+    - npm run test:functional -- 2 edge latest --timeout=10000
+  # Retrying to mitigate Edge install issues
+  retry: 1
+
+# Functional tests - MV3
+func:v3:chromium:latest:
+  extends: .functional
+  variables:
+    BROWSER: chromium latest
+    TEST_PARAMS: 3 $BROWSER --testKinds functional reload update
+
+func:v3:chromium:incognito:
+  extends: .functional
+  variables:
+    BROWSER: chromium latest
+    TEST_PARAMS: 3 $BROWSER --testKinds functional reload update --incognito
+
+func:v3:chromium:oldest:
+  extends: .functional
+  variables:
+    BROWSER: chromium $OLDEST_CHROMIUM_MV3_VERSION
+    TEST_PARAMS: 3 $BROWSER --testKinds functional reload update
+
+func:v3:edge:latest:
+  extends: .functional
+  variables:
+    BROWSER: edge latest
+    TEST_PARAMS: 3 $BROWSER --testKinds functional reload update
+
+# Functional tests - isolated
+.functional-isolated:
+  extends: .functional
+  stage: test
+  script:
+    - docker run $DOCKER_OPTIONS -e TEST_SUITES="$TEST_SUITES" -e TEST_PARAMS="$TEST_PARAMS" --entrypoint "test/dockerfiles/isolated-entrypoint.sh" $FUNCTIONAL_IMAGE
+  rules:
+    - !reference [.checktests-run, rules]
+
+.functional-isolated-mv3:
+  extends: .functional-isolated
+  variables:
+    # > removes interior line-breaks 
+    # - removes the line-break at the end of TEST_SUITES
+    TEST_SUITES: >-
+      Initialization
+      Console.logging
+      Endpoint.manipulation
+      Allowlisting
+      Element.Hiding
+      Snippets
+      ^Blocking
+      Notifications
+      Reporting
+      Subscriptions
+      Filter.list.updates
+      Subscription.events
+      ^Filters
+      Subscribe
+      Pop-up.blocking
+      MV3.Service.Workers
+      Synchronization
+
+.functional-isolated-mv2:
+  extends: .functional-isolated
+  variables:
+    TEST_SUITES: >-
+      Initialization
+      Console.logging
+      Endpoint.manipulation
+      Allowlisting
+      Element.Hiding
+      Snippets
+      ^Blocking
+      Notifications
+      Reporting
+      Subscriptions
+      Filter.list.updates
+      Subscription.events
+      ^Filters
+      Subscribe
+      Pop-up.blocking
+
+fi:v3:chromium:latest:
+  extends: .functional-isolated-mv3
+  variables:
+    TEST_PARAMS: 3 chromium latest
+
+fi:v3:edge:latest:
+  extends: .functional-isolated-mv3
+  variables:
+    TEST_PARAMS: 3 edge latest
+
+fi:v2:firefox:
+  extends: .functional-isolated-mv2
+  variables:
+    TEST_PARAMS: 2 firefox latest
+
+# Functional tests - full run
+.functional-full:
+  extends: .functional
+  allow_failure: true
+  rules:
+    - !reference [.full-run, rules]
+
+func:v3:chromium:beta:
+  extends: .functional-full
+  variables:
+    BROWSER: chromium beta
+    TEST_PARAMS: 3 $BROWSER --testKinds functional reload update
+
+func:v2:firefox:incognito:update:
+  extends: .functional-full
+  variables:
+    BROWSER: firefox $BSL_FIREFOX_INCOGNITO_VERSION
+    TEST_PARAMS: 2 $BROWSER --testKinds update --incognito
+  allow_failure: false
+
+func:v2:edge:latest:
+  extends: .functional-full
+  variables:
+    BROWSER: edge
+    TEST_PARAMS: 2 $BROWSER --testKinds functional reload
+
+# Fuzz tests
+.fuzz:
+  extends: .functional
+  stage: fuzz
+  variables:
+    TEST_PARAMS: 3 $BROWSER $INCOGNITO --testKinds fuzz
+
+fuzz:v3:chromium:latest:
+  extends: .fuzz
+  variables:
+    BROWSER: chromium latest
+
+fuzz:v3:chromium:incognito:
+  extends: .fuzz
+  variables:
+    BROWSER: chromium latest
+    INCOGNITO: --incognito
+  rules:
+    - !reference [.full-run, rules]
+
+fuzz:v3:edge:latest:
+  extends: .fuzz
+  variables:
+    BROWSER: edge latest
+  rules:
+    - !reference [.full-run, rules]
+
+# Compliance tests
+.compliance:
+  stage: compliance
+  extends: .docker-image
+  needs: ["build:src"]
+  before_script:
+    - apk add bash git zip
+  script:
+    - TERMINAL="t" TESTS_TO_INCLUDE="filters/wildcard-domain,filters/remove,filters/remove-extended,filters/remove-on-DOM-mutation,filters/remove-extended-inversion,$MV3_ONLY_TESTS" ./test/scripts/compliance.sh
+  after_script:
+    - docker cp $(docker ps -aqf ancestor=$COMPLIANCE_IMAGE):/testpages.adblockplus.org/test/screenshots .
+  artifacts:
+    paths:
+      - screenshots/
+    when: always
+    expire_in: 1 day
+  rules:
+    - !reference [.master-run, rules]
+
+comp:v2:firefox:
+  extends: .compliance
+  variables:
+    VERSION: latest
+    BROWSER: firefox
+    MANIFEST: mv2
+
+comp:v2:chromium:
+  extends: .compliance
+  variables:
+    VERSION: $LATEST_CHROMIUM_MV2_VERSION
+    BROWSER: chromium
+    MANIFEST: mv2
+
+comp:v3:chromium:
+  extends: .compliance
+  variables:
+    VERSION: latest
+    BROWSER: chromium
+    MANIFEST: mv3
+    MV3_ONLY_TESTS: exceptions/sitekey_mv3
+
+comp:v3:edge:
+  extends: .compliance
+  variables:
+    VERSION: latest
+    BROWSER: edge
+    MANIFEST: mv3
+    MV3_ONLY_TESTS: exceptions/sitekey_mv3
+
+# Integration tests
+int:scripts:
+  extends: .basic-image
+  stage: integration
+  script:
+    - docker run $DOCKER_OPTIONS --entrypoint test/dockerfiles/integration-entrypoint.sh $BASIC_IMAGE
+  rules:
+    - !reference [.avoid-flaky-run, rules]
+
+int:bundle:
+  stage: integration
+  script:
+    - npm run test:bundle
+  needs: ["build:src"]
+  rules:
+    - !reference [.avoid-flaky-run, rules]
+
+# Performance tests
+.performance:
+  extends: .functional
+  stage: performance
+  script:
+    - docker run $DOCKER_OPTIONS --entrypoint npm $FUNCTIONAL_IMAGE run test:performance $PARAMS
+
+perf:v2:chromium:
+  extends: .performance
+  variables:
+    PARAMS: 2 chromium
+
+perf:v3:chromium:
+  extends: .performance
+  variables:
+    PARAMS: 3 chromium

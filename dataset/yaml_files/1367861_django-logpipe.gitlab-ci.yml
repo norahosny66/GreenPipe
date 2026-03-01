@@ -1,0 +1,77 @@
+variables:
+  ADVERTISED_HOST: "spotify__kafka"
+  ADVERTISED_PORT: "9092"
+  AUTO_CREATE_TOPICS: "true"
+  POSTGRES_HOST_AUTH_METHOD: "trust"
+
+stages:
+  - test
+  - release
+
+services:
+  - spotify/kafka@sha256:cf8f8f760b48a07fb99df24fab8201ec8b647634751e842b67103a25a388981b
+  - postgres:latest@sha256:69e8582b781cb44fa4557b98ed586fe68361e320d9b12f9707494335634f4f3d
+
+cache:
+  key: "$CI_PROJECT_NAME"
+  paths:
+    - $HOME/.cache/pip
+
+include:
+  - component: gitlab.com/thelabnyc/thelab-ci-components/review@0.7.1
+  - component: gitlab.com/thelabnyc/thelab-ci-components/precommit@0.7.1
+    rules:
+      - if: $CI_PIPELINE_SOURCE == "schedule"
+        when: never
+      - if: $CI_COMMIT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true"
+      - if: $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"
+      - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  - component: gitlab.com/thelabnyc/thelab-ci-components/publish-gitlab-release@0.7.1
+  - component: gitlab.com/thelabnyc/thelab-ci-components/publish-to-pypi@0.7.1
+
+test:lib:
+  stage: test
+  image: "registry.gitlab.com/thelabnyc/python:${IMAGE}"
+  rules:
+    - if: $CI_COMMIT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true"
+    - if: $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  script:
+    - uv sync
+    - uv run tox
+  coverage: '/^TOTAL.+?(\d+\%)$/'
+  parallel:
+    matrix:
+      - IMAGE: "3.11"
+        TOX_SKIP_ENV: "^(?!py311-)"
+      - IMAGE: "3.12"
+        TOX_SKIP_ENV: "^(?!py312-)"
+      - IMAGE: "3.13"
+        TOX_SKIP_ENV: "^(?!py313-)"
+      - IMAGE: "3.14"
+        TOX_SKIP_ENV: "^(?!py314-)"
+
+test:docs:
+  stage: test
+  image: "registry.gitlab.com/thelabnyc/python:3.14@sha256:c63eea6a970e5e36dec447435f3ba010db753e90eed65feec23b00e4f00caec8"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  script:
+    - uv sync
+    - make docs
+
+pages:
+  stage: release
+  image: "registry.gitlab.com/thelabnyc/python:3.14@sha256:c63eea6a970e5e36dec447435f3ba010db753e90eed65feec23b00e4f00caec8"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true"
+  needs:
+    - test:lib
+  script:
+    - uv sync
+    - make docs
+  artifacts:
+    paths:
+      - public

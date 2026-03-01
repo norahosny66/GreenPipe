@@ -1,0 +1,28 @@
+stages:
+  - test
+  - build
+  - deploy
+
+unit-tests:
+  stage: test
+  script: echo 'UNIT TEST JOB NOT IMPLEMENTED YET! PASSING...'
+  tags:
+    - unity
+
+build-unity:
+  stage: build
+  script: ./androidbuild.bat
+  artifacts:
+    paths:
+      - build/android/novasloth-guessn2d.apk
+      - build.log
+    expire_in: 7 days
+    when: always
+  tags:
+    - unity
+
+deploy-playstore:
+  stage: deploy
+  script: echo 'PLAYSTORE DEPLOYMENT JOB NOT IMPLEMENTED YET! PASSING...'
+  tags:
+    - unity

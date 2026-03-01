@@ -1,0 +1,34 @@
+default:
+  image: node:14-buster
+
+install_package:
+  stage: build
+  script:
+    - npm install --unsafe-perm
+  artifacts:
+    paths:
+      - node_modules
+      - dist
+
+test_package:
+  stage: test
+  script:
+    - npm test
+
+publish_package:
+  stage: deploy
+  script:
+    - echo '//registry.npmjs.org/:_authToken=${NPM_TOKEN}' > .npmrc
+    - npm publish
+  only:
+    - release
+
+pages:
+  stage: deploy
+  script:
+    - mv ./docs ./public
+  artifacts:
+    paths:
+    - public
+  only:
+  - release

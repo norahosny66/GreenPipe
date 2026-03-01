@@ -1,0 +1,82 @@
+stages:
+  - deploy
+  - destroy
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_BRANCH
+
+pages:
+  stage: deploy
+  image: antora/antora
+  variables:
+    DOCSEARCH_ENGINE: lunr
+    DOCSEARCH_ENABLED: "true"
+  environment:
+    name: pages
+    url: $CI_PAGES_URL
+  script:
+    - npm install antora-site-generator-lunr@0.6.1
+    - >-
+      antora generate playbook.yml
+      --to-dir public
+      --clean
+      --require antora-site-generator-lunr
+      --generator antora-site-generator-lunr
+    # Fix edit this page links
+    - |
+      find "$(pwd)/public" -type f -regex ".*\.html" \
+        | xargs sed "s;${CI_PROJECT_URL}/edit/HEAD/;${CI_PROJECT_URL}/edit/${CI_DEFAULT_BRANCH}/;g" -i
+  artifacts:
+    paths:
+      - public
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+.environment:
+  image: registry.gitlab.com/gitlab-org/terraform-images/stable:latest
+  variables:
+    TF_ROOT: ${CI_PROJECT_DIR}/environment
+    TF_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/google:$TF_VAR_google_project"
+  cache:
+    key: cloud-environment
+    paths:
+      - ${TF_ROOT}/.terraform
+  environment:
+    name: google
+    url: https://console.cloud.google.com/home/dashboard?project=$TF_VAR_google_project
+  rules:
+    - when: manual
+  before_script:
+    - cd $TF_ROOT
+    - gitlab-terraform init
+
+environment:deploy:
+  extends: [".environment"]
+  stage: deploy
+  environment:
+    on_stop: "environment:destroy"
+    auto_stop_in: 12 hours
+    action: start
+  artifacts:
+    name: plan
+    public: false
+    paths:
+      - ${TF_ROOT}/plan.cache
+      - ${TF_ROOT}/google-application-credentials.json
+      - ${TF_ROOT}/bucket-name.txt
+    reports:
+      terraform: ${TF_ROOT}/plan.json
+  script:
+    - gitlab-terraform plan
+    - gitlab-terraform plan-json
+    - gitlab-terraform apply
+
+environment:destroy:
+  extends: [".environment"]
+  stage: destroy
+  needs: ["environment:deploy"]
+  environment:
+    action: stop
+  script:
+    - gitlab-terraform destroy

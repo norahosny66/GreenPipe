@@ -1,0 +1,29 @@
+#
+# https://gitlab.com/gitlab-org/gitlab/-/tree/master/lib/gitlab/ci/templates/Python.gitlab-ci.yml
+#
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+cache:
+  paths:
+    - .cache/pip
+
+test:
+  image: python:$PYTHON_VERSION
+  parallel:
+    matrix:
+      - PYTHON_VERSION: ["3.14", "3.13", "3.12", "3.11"]
+        name: "test"
+  before_script:
+    - git fetch origin main
+    - python -V
+    - ./manage.py --help
+  script:
+    - ./manage.py coverage
+  coverage: '/(?i)total.*? (100(?:\.0+)?\%|[1-9]?\d(?:\.\d+)?\%)$/'
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml

@@ -1,0 +1,50 @@
+stages:
+  - prepare
+  - test
+
+workflow:
+  rules:
+    # For merge requests, create a pipeline.
+    - if: '$CI_MERGE_REQUEST_IID'
+    # For `master` branch, create a pipeline (this includes on schedules, pushes, merges, etc.).
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    # For tags, create a pipeline.
+    - if: '$CI_COMMIT_TAG'
+    # For stable, and security branches, create a pipeline.
+    - if: '$CI_COMMIT_BRANCH =~ /^[\d-]+-stable(-ee)?$/'
+    - if: '$CI_COMMIT_BRANCH =~ /^security\//'
+
+include:
+  - local: .gitlab/ci/prepare.yml
+  - local: .gitlab/ci/test.yml
+  - component: ${CI_SERVER_FQDN}/gitlab-org/components/danger-review/danger-review@2.1.0
+    rules:
+      - if: '$CI_SERVER_HOST == "gitlab.com" && $CI_PROJECT_PATH == "gitlab-org/gitlab-pages"'
+      - if: '$CI_SERVER_HOST == "gitlab.com" && $CI_PROJECT_PATH == "gitlab-org/security/gitlab-pages"'
+
+default:
+  image: golang:1.24
+  tags:
+    - gitlab-org
+
+.common:
+  variables:
+    GOPATH: $CI_PROJECT_DIR/.GOPATH
+  cache:
+    paths:
+      - .GOPATH/pkg/mod/
+    policy: pull
+
+download deps:
+  needs: []
+  extends: .common
+  script:
+    - make deps-download
+  cache:
+    key:
+      files:
+        - go.mod
+        - go.sum
+    paths:
+      - .GOPATH/pkg/mod/
+    policy: push

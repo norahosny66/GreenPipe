@@ -1,0 +1,12 @@
+variables:
+  DS_REPORT_URL: "https://gitlab.com/gitlab-org/security-products/analyzers/gemnasium/-/raw/master/qa/expect/$CI_PROJECT_NAME/default/gl-dependency-scanning-report.json"
+  DS_DEPENDENCY_PATH_MODE: all
+
+stages:
+  - test
+  - qa
+
+include:
+  - template: Dependency-Scanning.gitlab-ci.yml
+
+  - https://gitlab.com/gitlab-org/security-products/ci-templates/-/raw/master/includes-dev/qa-dependency_scanning.yml

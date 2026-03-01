@@ -1,0 +1,35 @@
+# References
+# https://akyriako.medium.com/build-golang-docker-images-with-gitlab-ci-pipelines-2117f8505350
+# https://www.docker.com/blog/multi-arch-build-what-about-gitlab-ci/
+# https://blog.aoirint.com/entry/2023/gitlab_ci_docker_build_2023/
+# https://gitlab.com/gitlab-org/release-cli/-/tree/master/
+# https://tech-blog.optim.co.jp/entry/2021/12/23/100000
+# https://stackoverflow.com/questions/46810829/use-semver-or-a-timestamp-in-gitlab-piplelines
+# https://gist.github.com/carlallen/781a3e40247cff021a7e77de5fb81a47
+# https://blog.aoirint.com/entry/2023/gitlab_ci_docker_build_2023/
+# https://qiita.com/utrhira/items/0227a0dde84d193132c2
+# https://stackoverflow.com/questions/67570911/gitlab-how-to-include-the-previous-jobs-artifacts-as-release-assets
+# https://obel.hatenablog.jp/entry/20210331/1617132600
+
+variables:
+  GO_VERSION: 1.25.7
+  OUTPUT_NAME: sparkle-server
+  GO_ENTRYPOINT: cmd/main/main.go
+  BATCH_OUTPUT_NAME: sparkle-server-batch
+  BATCH_GO_ENTRYPOINT: cmd/batch/main.go
+  PACKAGE_REGISTRY_URL: "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/$OUTPUT_NAME"
+
+image: golang:${GO_VERSION}
+
+include:
+  - local: .gitlab/ci/test.yml
+  - local: .gitlab/ci/create_tag.yml
+  - local: .gitlab/ci/release_binary.yml
+  - local: .gitlab/ci/release_container.yml
+
+stages:
+  - test
+  - create_tag
+  - build_binary
+  - release_binary
+  - release_container
