@@ -1,0 +1,21 @@
+{
+  "percentiles": {
+    "p25": 311.43,
+    "p50": 622.85,
+    "p75": 1193.8,
+    "p90": 2143.64
+  },
+  "pattern_frequency_percent": {
+    "NO_RETRY": 88.5,
+    "NO_TIMEOUT": 88.5,
+    "NO_INTERRUPTIBLE": 87.5,
+    "NO_SHALLOW_CLONE": 87.0,
+    "NO_CACHE": 67.0,
+    "NO_ALPINE_IMAGES": 62.5,
+    "LEGACY_ONLY_EXCEPT": 27.5,
+    "NO_DAG_NEEDS": 22.0,
+    "DOCKER_IN_DOCKER": 18.0
+  },
+  "total_projects": 200,
+  "avg_waste_score": 5.5
+}

@@ -1,0 +1,62 @@
+dataset_info:
+  total_projects: 200
+  collection_method: GitLab API + public projects
+  analysis_date: '2026-03-01'
+waste_patterns:
+  average_waste_score: 5.5
+  median_waste_score: 6.0
+  pattern_frequency:
+    NO_RETRY:
+      count: 177
+      percent: 88.5
+    NO_TIMEOUT:
+      count: 177
+      percent: 88.5
+    NO_INTERRUPTIBLE:
+      count: 175
+      percent: 87.5
+    NO_SHALLOW_CLONE:
+      count: 174
+      percent: 87.0
+    NO_CACHE:
+      count: 134
+      percent: 67.0
+    NO_ALPINE_IMAGES:
+      count: 125
+      percent: 62.5
+    LEGACY_ONLY_EXCEPT:
+      count: 55
+      percent: 27.5
+    NO_DAG_NEEDS:
+      count: 44
+      percent: 22.0
+    DOCKER_IN_DOCKER:
+      count: 36
+      percent: 18.0
+  no_cache_percent: 76.0
+  no_interruptible_percent: 96.5
+  no_timeout_percent: 97.5
+  no_retry_percent: 97.5
+  no_shallow_clone_percent: 96.0
+  docker_in_docker_percent: 18.0
+pipeline_complexity:
+  avg_jobs: 3.6
+  median_jobs: 2.0
+  max_jobs: 47
+sci_distribution:
+  projects_analyzed: 158
+  avg_sci_before_gco2e: 1099.51
+  median_sci_before_gco2e: 622.85
+  p25_sci_gco2e: 311.43
+  p75_sci_gco2e: 1193.8
+  p90_sci_gco2e: 2143.64
+  avg_sci_after_gco2e: 769.25
+  avg_reduction_percent: 35.6
+  total_monthly_savings_gco2e: 2609088.0
+benchmarks_for_agent:
+  description: Use these to compare a pipeline against the dataset
+  excellent: "SCI < p25 \u2014 Better than 75% of pipelines"
+  good: "SCI between p25 and median \u2014 Better than average"
+  average: "SCI between median and p75 \u2014 Typical pipeline"
+  poor: "SCI between p75 and p90 \u2014 Worse than most"
+  critical: "SCI > p90 \u2014 Top 10% most wasteful pipelines"
