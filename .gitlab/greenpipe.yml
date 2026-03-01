@@ -1,0 +1,58 @@
+# GreenPipe Configuration
+# Place this file at .gitlab/greenpipe.yml in your repository
+# GreenPipe will read this to customize analysis per project
+
+# ─── Carbon Budget ───────────────────────────────────────
+# Maximum allowed carbon per pipeline run (in gCO2e)
+# GreenPipe will flag pipelines exceeding this budget
+carbon_budget_gco2e_per_run: 50
+
+# ─── Runner Configuration ────────────────────────────────
+# Override defaults if you know your runner specs
+runner:
+  # CPU TDP per vCPU in watts (default: 7W for shared runners)
+  # GitLab shared runners use AMD EPYC 7B12, ~225W / 128 threads × 4 vCPUs
+  tdp_per_vcpu_watts: 7
+  # Number of vCPUs per job (default: 2)
+  vcpus: 2
+  # Power Usage Effectiveness of data center (default: 1.1)
+  pue: 1.1
+  # Expected runner hardware lifespan in years (for embodied carbon)
+  lifespan_years: 4
+  # Total embodied carbon of runner server in kgCO2e (for M in SCI)
+  # Default based on Dell PowerEdge R750 LCA estimate
+  embodied_carbon_kgco2e: 1200
+
+# ─── Grid Carbon Intensity ───────────────────────────────
+# gCO2e per kWh - override based on your runner region
+# Defaults by region:
+#   Global average: 400
+#   US average: 400
+#   EU average: 230
+#   Nordic (Sweden/Norway): 13
+#   France: 50
+#   Germany: 350
+#   India: 700
+#   China: 550
+#   GCP us-central1: 440
+#   GCP europe-west1: 130
+#   AWS us-east-1: 380
+carbon_intensity_gco2e_per_kwh: 400
+
+# ─── Analysis Settings ───────────────────────────────────
+# Estimated pipeline runs per month (for monthly projections)
+estimated_runs_per_month: 50
+
+# Patterns to skip (if you intentionally use these)
+skip_patterns: []
+# Example: skip_patterns: ["DOCKER_IN_DOCKER", "NO_ALPINE_IMAGES"]
+
+# ─── Report Settings ─────────────────────────────────────
+# Post report as issue comment
+post_to_issue: true
+# Create tracking issue with findings
+create_tracking_issue: true
+# Include optimized YAML in report
+include_optimized_yaml: true
+# Include SCI methodology explanation
+include_sci_methodology: true
