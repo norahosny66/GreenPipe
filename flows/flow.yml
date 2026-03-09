@@ -84,12 +84,14 @@ definition:
           - arxiv:2510.26413 found GitHub Actions alone produced 456.9 MTCO2e in 2024
           - A 2025 systematic mapping study of 92 papers (MDPI) found ZERO papers on
             AI-driven carbon optimization of CI/CD — this is a novel research contribution
-          - Our dataset of 200 real GitLab pipelines shows:
-            * Average waste score: 5.5 out of 9 possible patterns
-            * 76% have NO cache configured
-            * 96.5% lack interruptible: true
-            * 18% use Docker-in-Docker
-            * Average 3.6 jobs per pipeline
+          - Our dataset of 200 real GitLab pipelines (158 with valid CI configs) shows:
+            * Average waste score: 5.5/9
+            * Top waste patterns: NO_RETRY 88%, NO_TIMEOUT 88%, NO_INTERRUPTIBLE 88%, NO_SHALLOW_CLONE 87%, NO_CACHE 67%
+            * SCI distribution: P25=311 gCO2e, Median=623 gCO2e, P75=1194 gCO2e, P90=2144 gCO2e
+            * Average SCI before optimization: 1099.51 gCO2e/run
+            * Average SCI after optimization: 769.25 gCO2e/run
+            * Average reduction potential: 35.6%
+            * Estimated total monthly savings across dataset: 2,609 kgCO2e
 
           ## Analysis Process
 
@@ -103,8 +105,18 @@ definition:
              - carbon_intensity_gco2e_per_kwh → grid intensity
              - estimated_runs_per_month → monthly multiplier
              - skip_patterns → patterns to ignore
-          4. Also check for dataset/yaml_files/ directory — if present, note that
-             this project contains a research dataset of CI/CD configurations
+          4. Check for dataset/dataset_benchmarks.json using find_files
+          5. If benchmarks exist, read them to compare this pipeline against dataset:
+             - P25 = 311.43 gCO2e (better than 75% of pipelines)
+             - Median = 622.85 gCO2e (average pipeline)
+             - P75 = 1193.80 gCO2e (worse than 75% of pipelines)
+             - P90 = 2143.64 gCO2e (top 10% most wasteful)
+             Use these to add a benchmark rating to the report:
+             - ✅ EXCELLENT: SCI < 311 gCO2e (better than 75% of 200 pipelines)
+             - 🟢 GOOD: SCI 311-623 gCO2e (better than average)
+             - 🟡 AVERAGE: SCI 623-1194 gCO2e (typical pipeline)
+             - 🟠 POOR: SCI 1194-2144 gCO2e (worse than 75%)
+             - 🔴 CRITICAL: SCI > 2144 gCO2e (top 10% most wasteful)
 
           ### Step 2: Detect 13 Waste Patterns
 
@@ -181,6 +193,7 @@ definition:
           | Monthly (×N runs) | X.XX gCO2e | X.XX gCO2e | -XX% |
 
           **Carbon Budget:** ✅ WITHIN BUDGET (X / 50 gCO2e) or ❌ OVER BUDGET by XX%
+          **Benchmark:** [rating emoji] [RATING] — [comparison to 200 pipelines]
 
           ---
 
@@ -219,7 +232,9 @@ definition:
 
           ## 📚 Methodology
           SCI = ((E × I) + M) / R per ISO/IEC 21031:2024
-          Validated against 200 real-world GitLab pipelines (dataset avg waste: 5.5/9)
+          Benchmarked against 200 real GitLab pipelines:
+          - Median SCI: 622.85 gCO2e/run | Avg reduction: 35.6%
+          - Top waste: NO_RETRY (88%), NO_TIMEOUT (88%), NO_INTERRUPTIBLE (88%), NO_CACHE (67%)
 
           ## Important Rules
           - Always show numbers and calculations — never vague
