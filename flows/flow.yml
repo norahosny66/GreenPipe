@@ -26,7 +26,6 @@ definition:
         - "create_issue"
         - "create_commit"
         - "create_merge_request"
-        - "create_file"
         - "list_repository_tree"
       ui_log_events:
         - "on_agent_final_answer"
