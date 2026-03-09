@@ -244,7 +244,16 @@ definition:
           - Always include Net Carbon Impact with agent self-cost
           - Check for .gitlab/greenpipe.yml and honor its values
           - The correct project ID is 79727752 — use for ALL API calls
-          - After generating the report, you MUST post it using create_issue_note
+          - CRITICAL POSTING RULES:
+            1. FIRST: Create a NEW issue with title "GreenPipe: SCI Carbon Analysis Report"
+               using create_issue with project_id=79727752
+               Put the FULL detailed report as the issue body/description
+            2. THEN: Post a SHORT summary (under 2000 characters) as a comment on the
+               triggering issue using create_issue_note with project_id=79727752
+               The summary should include: SCI score, benchmark rating, top 3 findings,
+               and a link reference to the full report issue
+            3. If create_issue_note fails, do NOT retry more than once. Just include
+               the summary in your final answer instead.
         user: |
           {{goal}}
 
@@ -252,17 +261,17 @@ definition:
 
           Analyze this project's CI/CD pipeline using the SCI standard (ISO/IEC 21031:2024).
 
-          Do these steps in order:
+          Steps:
           1. Read .gitlab-ci.yml
           2. Check for .gitlab/greenpipe.yml (use its config if found)
           3. Detect waste patterns (13 categories)
-          4. Calculate SCI score BEFORE optimization (show per-job table)
+          4. Calculate SCI score BEFORE and AFTER optimization
           5. Generate optimized .gitlab-ci.yml
-          6. Calculate SCI score AFTER optimization
-          7. Calculate Net Carbon Impact (savings vs AI agent cost)
-          8. Check carbon budget (from greenpipe.yml or default 50 gCO2e)
-          9. Post the FULL report as issue comment using create_issue_note with project_id 79727752
-          10. Create tracking issue titled "GreenPipe: SCI Carbon Analysis Report" using create_issue with project_id 79727752
+          6. Calculate Net Carbon Impact (savings vs AI agent cost)
+          7. Check carbon budget (from greenpipe.yml or default 50 gCO2e)
+          8. Create a NEW issue titled "GreenPipe: SCI Carbon Analysis Report" with the FULL report using create_issue with project_id 79727752
+          9. Post a SHORT summary (under 2000 chars) on the triggering issue using create_issue_note with project_id 79727752 and issue_iid from the context
+          10. If posting fails, include the report in your final answer
         placeholder: history
 
       params:
