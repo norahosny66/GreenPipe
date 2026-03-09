@@ -1,17 +1,139 @@
-# You must declare these so they match the Policy's allowed stages
+# GreenPipe Project CI/CD Pipeline
+# This file serves dual purpose:
+# 1. Runs dataset analysis to generate benchmarks (greenpipe_stats job)
+# 2. Contains intentionally wasteful sample jobs for GreenPipe to analyze
+
 stages:
+  - analysis
+  - install
+  - lint
   - test
+  - build
   - deploy
 
-# This job should now appear because it uses an approved stage
-register-flow:
-  stage: deploy
-  image: registry.gitlab.com/gitlab-org/cli:latest
+# ════════════════════════════════════════════════════════════
+# GreenPipe Dataset Analysis Job
+# Runs the stats script and stores benchmarks as artifacts
+# ════════════════════════════════════════════════════════════
+
+greenpipe_stats:
+  stage: analysis
+  image: python:3.11-alpine
+  before_script:
+    - pip install pyyaml --quiet
   script:
-    - echo "Syncing flows to the Catalog..."
-    - glab ai catalog sync --file catalog.json
+    - python3 scripts/generate_dataset_stats.py --dataset dataset/
+    - echo "=== Dataset Benchmarks ==="
+    - cat dataset/dataset_benchmarks.json
+    - echo ""
+    - echo "=== SCI Distribution ==="
+    - head -30 dataset/batch_analysis_results.csv
+  artifacts:
+    paths:
+      - dataset/dataset_stats.yml
+      - dataset/dataset_benchmarks.json
+      - dataset/batch_analysis_results.csv
+    expire_in: 30 days
   rules:
-    - if: $CI_PIPELINE_SOURCE == "push"
-      when: manual
-    - if: $CI_PIPELINE_SOURCE == "web"
-      when: always
+    - changes:
+        - dataset/**/*
+        - scripts/generate_dataset_stats.py
+    - when: manual
+      allow_failure: true
+
+# ════════════════════════════════════════════════════════════
+# SAMPLE WASTEFUL PIPELINE (for GreenPipe to analyze)
+# These jobs are intentionally inefficient to demonstrate
+# GreenPipe's waste detection capabilities.
+# ════════════════════════════════════════════════════════════
+
+install_dependencies:
+  stage: install
+  image: ubuntu:latest
+  script:
+    - apt-get update && apt-get install -y nodejs npm python3 pip curl
+    - npm install
+    - pip install -r requirements.txt
+  artifacts:
+    paths:
+      - node_modules/
+      - .venv/
+
+lint_code:
+  stage: lint
+  image: ubuntu:latest
+  script:
+    - apt-get update && apt-get install -y nodejs npm
+    - npm install
+    - npm run lint
+
+lint_python:
+  stage: lint
+  image: python:latest
+  script:
+    - pip install flake8 black
+    - flake8 src/
+    - black --check src/
+
+run_unit_tests:
+  stage: test
+  image: ubuntu:latest
+  script:
+    - apt-get update && apt-get install -y nodejs npm
+    - npm install
+    - npm test
+
+run_integration_tests:
+  stage: test
+  image: ubuntu:latest
+  script:
+    - apt-get update && apt-get install -y nodejs npm python3
+    - npm install
+    - npm run test:integration
+
+run_e2e_tests:
+  stage: test
+  image: ubuntu:latest
+  services:
+    - docker:dind
+  script:
+    - apt-get update && apt-get install -y nodejs npm docker.io
+    - npm install
+    - npm run test:e2e
+
+build_app:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - docker build -t $CI_REGISTRY_IMAGE:latest .
+    - docker push $CI_REGISTRY_IMAGE:latest
+  artifacts:
+    paths:
+      - dist/
+
+build_docs:
+  stage: build
+  image: ubuntu:latest
+  script:
+    - apt-get update && apt-get install -y python3 pip
+    - pip install mkdocs
+    - mkdocs build
+  artifacts:
+    paths:
+      - site/
+
+deploy_staging:
+  stage: deploy
+  image: ubuntu:latest
+  script:
+    - apt-get update && apt-get install -y curl
+    - curl -X POST https://staging.example.com/deploy
+
+deploy_production:
+  stage: deploy
+  image: ubuntu:latest
+  script:
+    - apt-get update && apt-get install -y curl
+    - curl -X POST https://production.example.com/deploy
