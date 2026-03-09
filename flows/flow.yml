@@ -24,6 +24,9 @@ definition:
         - "get_merge_request"
         - "list_merge_request_diffs"
         - "create_issue"
+        - "create_commit"
+        - "create_merge_request"
+        - "create_file"
         - "list_repository_tree"
       ui_log_events:
         - "on_agent_final_answer"
@@ -216,30 +219,65 @@ definition:
           - Always include Net Carbon Impact with agent self-cost
           - Check for .gitlab/greenpipe.yml and honor its values
           - The correct project ID is 79727752 — use for ALL API calls
-          - CRITICAL POSTING RULES:
-            1. Generate the FULL report first as text, following the report template above
-            2. Use create_issue to create a NEW issue in project_id=79727752 with:
-               - title: "GreenPipe: SCI Carbon Analysis Report"
-               - description: the FULL report text (pass it as the description parameter)
-               Make sure to include the complete report text in the description field.
-            3. Do NOT use create_issue_note at all — it does not work due to permissions
-            4. After creating the issue, output the full report as your final answer too
+
+          ## CRITICAL: Auto-Fix MR Workflow
+
+          After analysis, you MUST create an auto-fix merge request. Follow these steps IN ORDER:
+
+          STEP A — Generate the optimized .gitlab-ci.yml content
+          Apply all waste pattern fixes to create a complete, valid .gitlab-ci.yml.
+          Keep the greenpipe_stats job unchanged. Fix everything else.
+          
+          STEP B — Validate with ci_linter
+          Use ci_linter to validate the optimized YAML before committing.
+          If validation fails, fix the errors and try again.
+
+          STEP C — Create a commit on a new branch
+          Use create_commit with:
+          - project_id: 79727752
+          - branch: "greenpipe/optimize-pipeline" 
+          - start_branch: "main"
+          - commit_message: "GreenPipe: Optimize CI/CD pipeline (SCI reduction: XX%)"
+          - actions: [{ action: "update", file_path: ".gitlab-ci.yml", content: <optimized yaml> }]
+
+          STEP D — Create a Merge Request
+          Use create_merge_request with:
+          - project_id: 79727752
+          - source_branch: "greenpipe/optimize-pipeline"
+          - target_branch: "main"
+          - title: "🌿 GreenPipe: Reduce pipeline carbon by XX% (SCI: XX → XX gCO2e)"
+          - description: the SCI analysis report (concise version with tables)
+
+          STEP E — Create tracking issue with the report
+          Use create_issue with:
+          - project_id: 79727752
+          - title: "GreenPipe: SCI Carbon Analysis Report"
+          - description: the full analysis report
+
+          STEP F — Output summary as final answer
+          Include: SCI scores, top findings, link to MR and issue
+
+          If any step fails, continue with the next steps. Do NOT retry failed steps.
         user: |
           {{goal}}
 
           IMPORTANT: The correct project ID is 79727752. Use this for ALL API calls.
 
-          Analyze this project's CI/CD pipeline using the SCI standard (ISO/IEC 21031:2024).
+          Analyze this project's CI/CD pipeline and CREATE AN AUTO-FIX MERGE REQUEST.
 
           Steps:
           1. Read .gitlab-ci.yml, .gitlab/greenpipe.yml, dataset/dataset_benchmarks.json
-          2. Detect waste patterns (top 5 most impactful only)
-          3. Calculate SCI score BEFORE and AFTER (use 7W TDP, 400 gCO2e/kWh)
-          4. Calculate Net Carbon Impact (savings vs 1.5 gCO2e agent cost)
-          5. Check carbon budget (from greenpipe.yml or default 50 gCO2e)
-          6. Create NEW issue titled "GreenPipe: SCI Carbon Analysis Report" with the report as description using create_issue with project_id 79727752
-          7. Output the report as your final answer
-          KEEP THE REPORT CONCISE — under 3000 words. No full optimized YAML.
+          2. Detect waste patterns (top 5 most impactful)
+          3. Calculate SCI score BEFORE (use 7W TDP, 400 gCO2e/kWh, show per-job table)
+          4. Generate the COMPLETE optimized .gitlab-ci.yml with all fixes applied
+          5. Validate the optimized YAML with ci_linter
+          6. Calculate SCI score AFTER optimization
+          7. Calculate Net Carbon Impact (savings vs 1.5 gCO2e agent cost)
+          8. Use create_commit to commit optimized .gitlab-ci.yml on branch "greenpipe/optimize-pipeline" from "main" in project 79727752
+          9. Use create_merge_request to open MR from "greenpipe/optimize-pipeline" to "main" with the SCI report as description in project 79727752
+          10. Use create_issue to create tracking issue with full report in project 79727752
+          11. Output summary as final answer
+          KEEP REPORT CONCISE. Do not retry failed API calls.
         placeholder: history
 
       params:
