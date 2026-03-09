@@ -171,68 +171,42 @@ definition:
 
           ### Step 7: Format Report
 
-          Use EXACTLY this structure:
+          Use EXACTLY this structure (keep it concise, under 3000 words):
 
-          # 🌿 GreenPipe Carbon Footprint Analysis Report
+          # 🌿 GreenPipe SCI Carbon Analysis
 
-          **Standard:** ISO/IEC 21031:2024 (SCI)
-          **Project:** [name]  |  **Date:** [date]
+          **Standard:** ISO/IEC 21031:2024 | **SCI = ((E × I) + M) / R**
 
-          ---
-
-          ## 📊 SCI Score Summary
+          ## 📊 SCI Score
 
           | Metric | Before | After | Reduction |
           |--------|--------|-------|-----------|
-          | Energy per run | X.XXX kWh | X.XXX kWh | -XX% |
-          | Operational Carbon | X.XX gCO2e | X.XX gCO2e | -XX% |
-          | Embodied Carbon (M) | X.XX gCO2e | X.XX gCO2e | -XX% |
-          | **SCI Score** | **X.XX gCO2e/run** | **X.XX gCO2e/run** | **-XX%** |
-          | Monthly (×N runs) | X.XX gCO2e | X.XX gCO2e | -XX% |
+          | Energy | X.XXX kWh | X.XXX kWh | -XX% |
+          | SCI Score | X.XX gCO2e/run | X.XX gCO2e/run | -XX% |
+          | Monthly (×N) | X gCO2e | X gCO2e | -XX% |
 
-          **Carbon Budget:** ✅ WITHIN BUDGET (X / 50 gCO2e) or ❌ OVER BUDGET by XX%
-          **Benchmark:** [rating emoji] [RATING] — [comparison to 200 pipelines]
+          **Budget:** ✅ WITHIN / ❌ OVER (X / 50 gCO2e)
+          **Benchmark:** [emoji] [RATING] vs 200 pipelines (Median: 623 gCO2e)
 
-          ---
+          ## 🔍 Per-Job Carbon
 
-          ## 🔍 Per-Job Carbon Attribution
+          | Job | Min | gCO2e | % |
+          |-----|-----|-------|---|
+          | [each job] | X | X.X | X% |
 
-          | Job | Duration | Energy (Wh) | Carbon (gCO2e) | % Total |
-          |-----|----------|-------------|----------------|---------|
-          | [each job] | X min | X.XX | X.XX | XX% |
-          | **TOTAL** | **X min** | **X.XX** | **X.XX** | **100%** |
+          ## ⚠️ Top 5 Waste Patterns
 
-          ---
-
-          ## ⚠️ Waste Patterns (X/13 detected)
-
-          [For each pattern: name, severity, affected job, fix, savings]
-
-          ---
-
-          ## ✅ Optimized .gitlab-ci.yml
-
-          [Complete optimized YAML in code block]
-
-          ---
+          For each: pattern name, affected jobs, one-line fix, savings
 
           ## 🌍 Net Carbon Impact
 
-          | Component | Value |
-          |-----------|-------|
-          | Saved per run | X.XX gCO2e |
-          | Monthly savings (×N) | X.XX gCO2e |
-          | AI agent cost | ~1.5 gCO2e |
-          | **Net monthly savings** | **X.XX gCO2e** |
-          | **Carbon ROI** | **XXx** |
+          Saved/run: X gCO2e | Monthly: X gCO2e | Agent cost: 1.5 gCO2e | ROI: Xx
 
-          ---
+          ## 📚 Method
+          SCI per ISO/IEC 21031:2024 | 7W TDP | 400 gCO2e/kWh | Benchmarked vs 200 pipelines
 
-          ## 📚 Methodology
-          SCI = ((E × I) + M) / R per ISO/IEC 21031:2024
-          Benchmarked against 200 real GitLab pipelines:
-          - Median SCI: 622.85 gCO2e/run | Avg reduction: 35.6%
-          - Top waste: NO_RETRY (88%), NO_TIMEOUT (88%), NO_INTERRUPTIBLE (88%), NO_CACHE (67%)
+          NOTE: Do NOT include a full optimized .gitlab-ci.yml in the report.
+          Instead mention the top 5 fixes with short YAML snippets (3-5 lines each max).
 
           ## Important Rules
           - Always show numbers and calculations — never vague
@@ -258,17 +232,14 @@ definition:
           Analyze this project's CI/CD pipeline using the SCI standard (ISO/IEC 21031:2024).
 
           Steps:
-          1. Read .gitlab-ci.yml
-          2. Check for .gitlab/greenpipe.yml (use its config if found)
-          3. Detect waste patterns (13 categories)
-          4. Calculate SCI score BEFORE and AFTER optimization
-          5. Generate optimized .gitlab-ci.yml
-          6. Calculate Net Carbon Impact (savings vs AI agent cost)
-          7. Check carbon budget (from greenpipe.yml or default 50 gCO2e)
-          8. Generate the complete report following the template
-          9. Create a NEW issue titled "GreenPipe: SCI Carbon Analysis Report" with the FULL report as the description, using create_issue with project_id 79727752
-          10. Do NOT use create_issue_note — it will fail. Skip it entirely.
-          11. Output the full report as your final answer
+          1. Read .gitlab-ci.yml, .gitlab/greenpipe.yml, dataset/dataset_benchmarks.json
+          2. Detect waste patterns (top 5 most impactful only)
+          3. Calculate SCI score BEFORE and AFTER (use 7W TDP, 400 gCO2e/kWh)
+          4. Calculate Net Carbon Impact (savings vs 1.5 gCO2e agent cost)
+          5. Check carbon budget (from greenpipe.yml or default 50 gCO2e)
+          6. Create NEW issue titled "GreenPipe: SCI Carbon Analysis Report" with the report as description using create_issue with project_id 79727752
+          7. Output the report as your final answer
+          KEEP THE REPORT CONCISE — under 3000 words. No full optimized YAML.
         placeholder: history
 
       params:
