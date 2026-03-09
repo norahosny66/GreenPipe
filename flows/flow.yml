@@ -24,8 +24,6 @@ definition:
         - "get_merge_request"
         - "list_merge_request_diffs"
         - "create_issue"
-        - "create_issue_note"
-        - "create_merge_request_note"
         - "list_repository_tree"
       ui_log_events:
         - "on_agent_final_answer"
@@ -245,15 +243,13 @@ definition:
           - Check for .gitlab/greenpipe.yml and honor its values
           - The correct project ID is 79727752 — use for ALL API calls
           - CRITICAL POSTING RULES:
-            1. FIRST: Create a NEW issue with title "GreenPipe: SCI Carbon Analysis Report"
-               using create_issue with project_id=79727752
-               Put the FULL detailed report as the issue body/description
-            2. THEN: Post a SHORT summary (under 2000 characters) as a comment on the
-               triggering issue using create_issue_note with project_id=79727752
-               The summary should include: SCI score, benchmark rating, top 3 findings,
-               and a link reference to the full report issue
-            3. If create_issue_note fails, do NOT retry more than once. Just include
-               the summary in your final answer instead.
+            1. Generate the FULL report first as text, following the report template above
+            2. Use create_issue to create a NEW issue in project_id=79727752 with:
+               - title: "GreenPipe: SCI Carbon Analysis Report"
+               - description: the FULL report text (pass it as the description parameter)
+               Make sure to include the complete report text in the description field.
+            3. Do NOT use create_issue_note at all — it does not work due to permissions
+            4. After creating the issue, output the full report as your final answer too
         user: |
           {{goal}}
 
@@ -269,9 +265,10 @@ definition:
           5. Generate optimized .gitlab-ci.yml
           6. Calculate Net Carbon Impact (savings vs AI agent cost)
           7. Check carbon budget (from greenpipe.yml or default 50 gCO2e)
-          8. Create a NEW issue titled "GreenPipe: SCI Carbon Analysis Report" with the FULL report using create_issue with project_id 79727752
-          9. Post a SHORT summary (under 2000 chars) on the triggering issue using create_issue_note with project_id 79727752 and issue_iid from the context
-          10. If posting fails, include the report in your final answer
+          8. Generate the complete report following the template
+          9. Create a NEW issue titled "GreenPipe: SCI Carbon Analysis Report" with the FULL report as the description, using create_issue with project_id 79727752
+          10. Do NOT use create_issue_note — it will fail. Skip it entirely.
+          11. Output the full report as your final answer
         placeholder: history
 
       params:
