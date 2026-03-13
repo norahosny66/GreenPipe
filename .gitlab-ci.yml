@@ -1,139 +1,123 @@
-# GreenPipe Project CI/CD Pipeline
-# This file serves dual purpose:
-# 1. Runs dataset analysis to generate benchmarks (greenpipe_stats job)
-# 2. Contains intentionally wasteful sample jobs for GreenPipe to analyze
-
 stages:
-  - analysis
-  - install
-  - lint
-  - test
-  - build
-  - deploy
+  - Build and test
+  - Build
+  - Deploy
+  - Review
 
-# ════════════════════════════════════════════════════════════
-# GreenPipe Dataset Analysis Job
-# Runs the stats script and stores benchmarks as artifacts
-# ════════════════════════════════════════════════════════════
-
-greenpipe_stats:
-  stage: analysis
-  image: python:3.11-alpine
-  before_script:
-    - pip install pyyaml --quiet
+Frontend unit test:
+  stage: Build and test
+  image: node:20-alpine3.20
   script:
-    - python3 scripts/generate_dataset_stats.py --dataset dataset/
-    - echo "=== Dataset Benchmarks ==="
-    - cat dataset/dataset_benchmarks.json
-    - echo ""
-    - echo "=== SCI Distribution ==="
-    - head -30 dataset/batch_analysis_results.csv
+  - npm install
+  - npm run testtofile
+  coverage: /All files[^|]*\|[^|]*\s+([\d\.]+)/
   artifacts:
-    paths:
-      - dataset/dataset_stats.yml
-      - dataset/dataset_benchmarks.json
-      - dataset/batch_analysis_results.csv
-    expire_in: 30 days
-  rules:
-    - changes:
-        - dataset/**/*
-        - scripts/generate_dataset_stats.py
-    - when: manual
-      allow_failure: true
+    reports:
+      junit: ./junit.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: ./coverage/cobertura-coverage.xml
 
-# ════════════════════════════════════════════════════════════
-# SAMPLE WASTEFUL PIPELINE (for GreenPipe to analyze)
-# These jobs are intentionally inefficient to demonstrate
-# GreenPipe's waste detection capabilities.
-# ════════════════════════════════════════════════════════════
-
-install_dependencies:
-  stage: install
-  image: ubuntu:latest
+Frontend lint check:
+  stage: Build and test
+  image: node:20-alpine3.20
   script:
-    - apt-get update && apt-get install -y nodejs npm python3 pip curl
-    - npm install
-    - pip install -r requirements.txt
-  artifacts:
-    paths:
-      - node_modules/
-      - .venv/
-
-lint_code:
-  stage: lint
-  image: ubuntu:latest
-  script:
-    - apt-get update && apt-get install -y nodejs npm
     - npm install
     - npm run lint
 
-lint_python:
-  stage: lint
-  image: python:latest
+Frontend image build:
+  stage: Build and test
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
   script:
-    - pip install flake8 black
-    - flake8 src/
-    - black --check src/
-
-run_unit_tests:
-  stage: test
-  image: ubuntu:latest
-  script:
-    - apt-get update && apt-get install -y nodejs npm
-    - npm install
-    - npm test
-
-run_integration_tests:
-  stage: test
-  image: ubuntu:latest
-  script:
-    - apt-get update && apt-get install -y nodejs npm python3
-    - npm install
-    - npm run test:integration
-
-run_e2e_tests:
-  stage: test
-  image: ubuntu:latest
-  services:
-    - docker:dind
-  script:
-    - apt-get update && apt-get install -y nodejs npm docker.io
-    - npm install
-    - npm run test:e2e
-
-build_app:
-  stage: build
-  image: docker:latest
-  services:
-    - docker:dind
-  script:
-    - docker build -t $CI_REGISTRY_IMAGE:latest .
-    - docker push $CI_REGISTRY_IMAGE:latest
+    - export NORMALIZED_BRANCH=$(echo $CI_COMMIT_BRANCH | sed -e 's/[^[:alnum:]]//g' | cut -c -29)
+    - echo $NORMALIZED_BRANCH
+    - echo NORMALIZED_BRANCH=$NORMALIZED_BRANCH > build.env
+    - cat build.env
+    - >-
+      /kaniko/executor
+      --context "."
+      --dockerfile "./dockerfile"
+      --destination docker-registry-emotoagh-service.default/front:$NORMALIZED_BRANCH
+      --skip-tls-verify
   artifacts:
-    paths:
-      - dist/
+    reports:
+      dotenv: build.env
 
-build_docs:
-  stage: build
-  image: ubuntu:latest
-  script:
-    - apt-get update && apt-get install -y python3 pip
-    - pip install mkdocs
-    - mkdocs build
-  artifacts:
-    paths:
-      - site/
+Prepare frontend review deploy:
+  stage: Review
+  only:
+    - branches
+  except:
+    - master
+    - dev
+    - tags
+  needs:
+    - job: Frontend image build
+      artifacts: true
+  variables:
+    NORMALIZED_BRANCH: f-$NORMALIZED_BRANCH
+    FRONTEND_IMAGE: front:$NORMALIZED_BRANCH
+    UPSTREAM_BRANCH: $CI_COMMIT_BRANCH
+  trigger: 
+    project: spectrumagh/webappteam/deployments-WebApp
+    branch: dev
 
-deploy_staging:
-  stage: deploy
-  image: ubuntu:latest
+Dev build:
+  stage: Build
+  only:
+    - dev
+  needs:
+    - Frontend unit test
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
   script:
-    - apt-get update && apt-get install -y curl
-    - curl -X POST https://staging.example.com/deploy
+    - >-
+      /kaniko/executor
+      --context "."
+      --dockerfile "./dockerfile"
+      --destination docker-registry-emotoagh-service.default/front:dev
+      --skip-tls-verify
 
-deploy_production:
-  stage: deploy
-  image: ubuntu:latest
+Dev deploy trigger:
+  stage: Deploy
+  only:
+    - dev
+  needs:
+    - Dev build
+  variables:
+    UPSTREAM_BRANCH: $CI_COMMIT_BRANCH
+  trigger: 
+    strategy: depend
+    project: spectrumagh/webappteam/deployments-WebApp
+    branch: dev # upstream and downstream branches are the same 
+
+Production build:
+  stage: Build
+  only:
+  - tags
+  needs:
+    - Frontend unit test
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
   script:
-    - apt-get update && apt-get install -y curl
-    - curl -X POST https://production.example.com/deploy
+      /kaniko/executor
+      --context "."
+      --dockerfile "./dockerfile"
+      --destination docker-registry-emotoagh-service.default/front:$CI_COMMIT_TAG
+      --destination docker-registry-emotoagh-service.default/front
+      --skip-tls-verify
+
+Production deploy trigger:
+  stage: Deploy
+  only:
+  - tags
+  needs:
+    - Production build
+  trigger: 
+    strategy: depend
+    project: spectrumagh/webappteam/deployments-WebApp
+    branch: master
