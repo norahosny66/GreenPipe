@@ -4,12 +4,25 @@ stages:
   - Deploy
   - Review
 
+variables:
+  GIT_DEPTH: 10
+
+.node_cache_template: &node_cache
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - node_modules/
+      - .npm/
+
 Frontend unit test:
   stage: Build and test
   image: node:20-alpine3.20
+  <<: *node_cache
   script:
-  - npm install
-  - npm run testtofile
+    - npm ci --cache .npm --prefer-offline
+    - npm run testtofile
   coverage: /All files[^|]*\|[^|]*\s+([\d\.]+)/
   artifacts:
     reports:
@@ -17,13 +30,36 @@ Frontend unit test:
       coverage_report:
         coverage_format: cobertura
         path: ./coverage/cobertura-coverage.xml
+    expire_in: 1 week
+  timeout: 15m
+  retry:
+    max: 2
+    when:
+      - runner_system_failure
+      - stuck_or_timeout_failure
+  interruptible: true
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
 
 Frontend lint check:
   stage: Build and test
   image: node:20-alpine3.20
+  <<: *node_cache
+  needs: []
   script:
-    - npm install
+    - npm ci --cache .npm --prefer-offline
     - npm run lint
+  timeout: 10m
+  retry:
+    max: 2
+    when:
+      - runner_system_failure
+      - stuck_or_timeout_failure
+  interruptible: true
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
 
 Frontend image build:
   stage: Build and test
@@ -44,15 +80,19 @@ Frontend image build:
   artifacts:
     reports:
       dotenv: build.env
+    expire_in: 1 day
+  timeout: 20m
+  retry:
+    max: 1
+    when:
+      - runner_system_failure
+  interruptible: true
+  rules:
+    - if: $CI_COMMIT_BRANCH && $CI_COMMIT_BRANCH != "master" && $CI_COMMIT_BRANCH != "dev"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
 
 Prepare frontend review deploy:
   stage: Review
-  only:
-    - branches
-  except:
-    - master
-    - dev
-    - tags
   needs:
     - job: Frontend image build
       artifacts: true
@@ -63,11 +103,11 @@ Prepare frontend review deploy:
   trigger: 
     project: spectrumagh/webappteam/deployments-WebApp
     branch: dev
+  rules:
+    - if: $CI_COMMIT_BRANCH && $CI_COMMIT_BRANCH != "master" && $CI_COMMIT_BRANCH != "dev" && $CI_COMMIT_TAG == null
 
 Dev build:
   stage: Build
-  only:
-    - dev
   needs:
     - Frontend unit test
   image:
@@ -80,11 +120,17 @@ Dev build:
       --dockerfile "./dockerfile"
       --destination docker-registry-emotoagh-service.default/front:dev
       --skip-tls-verify
+  timeout: 20m
+  retry:
+    max: 1
+    when:
+      - runner_system_failure
+  interruptible: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == "dev"
 
 Dev deploy trigger:
   stage: Deploy
-  only:
-    - dev
   needs:
     - Dev build
   variables:
@@ -92,32 +138,41 @@ Dev deploy trigger:
   trigger: 
     strategy: depend
     project: spectrumagh/webappteam/deployments-WebApp
-    branch: dev # upstream and downstream branches are the same 
+    branch: dev
+  rules:
+    - if: $CI_COMMIT_BRANCH == "dev"
 
 Production build:
   stage: Build
-  only:
-  - tags
   needs:
     - Frontend unit test
   image:
     name: gcr.io/kaniko-project/executor:debug
     entrypoint: [""]
   script:
+    - >-
       /kaniko/executor
       --context "."
       --dockerfile "./dockerfile"
       --destination docker-registry-emotoagh-service.default/front:$CI_COMMIT_TAG
       --destination docker-registry-emotoagh-service.default/front
       --skip-tls-verify
+  timeout: 20m
+  retry:
+    max: 1
+    when:
+      - runner_system_failure
+  interruptible: false
+  rules:
+    - if: $CI_COMMIT_TAG
 
 Production deploy trigger:
   stage: Deploy
-  only:
-  - tags
   needs:
     - Production build
   trigger: 
     strategy: depend
     project: spectrumagh/webappteam/deployments-WebApp
     branch: master
+  rules:
+    - if: $CI_COMMIT_TAG
