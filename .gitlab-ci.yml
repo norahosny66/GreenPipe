@@ -24,6 +24,16 @@ Frontend lint check:
   script:
     - npm install
     - npm run lint
+  cache:
+    key: 
+      files:
+        - package-lock.json
+    paths:
+      - .cache/npm
+    policy: pull
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
 Frontend image build:
   stage: Build and test
