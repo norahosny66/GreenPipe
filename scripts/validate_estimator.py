@@ -18,14 +18,20 @@ def get_ci_yaml(project_id, token):
     r = requests.get(url, headers=get_headers(token), params={"ref": "HEAD"}, timeout=30)
     return r.text if r.status_code == 200 else None
 
+# In validate_estimator.py, replace the get_avg_duration function with:
 def get_avg_duration(project_id, token, n=10):
-    """Average duration (seconds) across recent successful pipelines."""
     url = f"{GITLAB_API}/projects/{project_id}/pipelines"
     r = requests.get(url, headers=get_headers(token),
                      params={"per_page": n, "status": "success"}, timeout=30)
-    if r.status_code != 200: return None
-    durations = [p["duration"] for p in r.json() if p.get("duration")]
-    return statistics.mean(durations) if durations else None
+    if r.status_code != 200:
+        return None, f"HTTP {r.status_code}"
+    pipelines = r.json()
+    if not pipelines:
+        return None, "no successful pipelines"
+    durations = [p["duration"] for p in pipelines if p.get("duration")]
+    if not durations:
+        return None, f"{len(pipelines)} pipelines, all with null duration"
+    return statistics.mean(durations), None
 
 def estimate_duration_minutes(content):
     """Same logic as generate_dataset_stats.py — must stay in sync."""
@@ -76,7 +82,11 @@ def main():
             break
         pid = proj["project_id"]
         path = proj.get("project_path", "?")
-        observed = get_avg_duration(pid, args.token)
+        observed, reason = get_avg_duration(pid, args.token)
+        time.sleep(0.4)
+        if observed is None:
+            print(f"  skip {path}: {reason}")
+            continue
         time.sleep(0.4)
         if observed is None or observed < 10:  # skip trivial pipelines
             continue
